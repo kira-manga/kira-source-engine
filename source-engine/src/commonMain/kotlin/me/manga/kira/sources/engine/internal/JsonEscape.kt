@@ -1,4 +1,4 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
 /**
  * Minimal, dependency-free JSON-string escaper (the engine has no kotlinx.serialization on this path).

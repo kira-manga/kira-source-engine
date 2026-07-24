@@ -1,10 +1,10 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
 import kotlinx.coroutines.test.runTest
-import me.manga.kira.sources.contracts.SourceEngineResult
-import me.manga.kira.sources.contracts.SourceMangaRef
-import me.manga.kira.sources.contracts.SourceConfigParser
-import me.manga.kira.sources.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.SourceEngineResult
+import me.manga.kira.source.contracts.SourceMangaRef
+import me.manga.kira.source.contracts.SourceConfigParser
+import me.manga.kira.source.contracts.model.SourceConfig
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue

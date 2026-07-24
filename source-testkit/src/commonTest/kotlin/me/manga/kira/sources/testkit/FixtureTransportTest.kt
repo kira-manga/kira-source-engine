@@ -1,9 +1,9 @@
 package me.manga.kira.sources.testkit
 
 import kotlinx.coroutines.test.runTest
-import me.manga.kira.sources.contracts.SourceHttpMethod
-import me.manga.kira.sources.contracts.SourceRequest
-import me.manga.kira.sources.contracts.SourceResponse
+import me.manga.kira.source.contracts.SourceHttpMethod
+import me.manga.kira.source.contracts.SourceRequest
+import me.manga.kira.source.contracts.SourceResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 

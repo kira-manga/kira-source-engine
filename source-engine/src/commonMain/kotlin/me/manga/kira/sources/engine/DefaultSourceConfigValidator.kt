@@ -1,12 +1,12 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
-import me.manga.kira.sources.contracts.SourceConfigValidator
-import me.manga.kira.sources.contracts.StrategyRegistry
-import me.manga.kira.sources.contracts.ValidationResult
-import me.manga.kira.sources.contracts.model.FilterDefinition
-import me.manga.kira.sources.contracts.model.IconSpec
-import me.manga.kira.sources.contracts.model.SourceConfig
-import me.manga.kira.sources.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.SourceConfigValidator
+import me.manga.kira.source.contracts.StrategyRegistry
+import me.manga.kira.source.contracts.ValidationResult
+import me.manga.kira.source.contracts.model.FilterDefinition
+import me.manga.kira.source.contracts.model.IconSpec
+import me.manga.kira.source.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.model.SourceConfigDocument
 
 /**
  * Schema + referential validator. Runs after signature verification, before any source is trusted.

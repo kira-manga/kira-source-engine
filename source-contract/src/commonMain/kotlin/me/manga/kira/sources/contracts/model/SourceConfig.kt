@@ -1,4 +1,4 @@
-package me.manga.kira.sources.contracts.model
+package me.manga.kira.source.contracts.model
 
 import kotlinx.serialization.Serializable
 

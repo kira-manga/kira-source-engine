@@ -1,9 +1,9 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
-import me.manga.kira.sources.contracts.SourceHeaderProvider
-import me.manga.kira.sources.contracts.SourceRequest
-import me.manga.kira.sources.contracts.SourceResponse
-import me.manga.kira.sources.contracts.SourceTransport
+import me.manga.kira.source.contracts.SourceHeaderProvider
+import me.manga.kira.source.contracts.SourceRequest
+import me.manga.kira.source.contracts.SourceResponse
+import me.manga.kira.source.contracts.SourceTransport
 
 /**
  * The golden-fixture harness for the generic engine. Everything the engine does — request templating,

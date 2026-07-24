@@ -1,4 +1,4 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
 /**
  * Minimal, dependency-free percent-encoder for query values (the engine has no Ktor). Encodes

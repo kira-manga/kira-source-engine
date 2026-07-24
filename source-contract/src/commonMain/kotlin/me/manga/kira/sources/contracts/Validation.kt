@@ -1,6 +1,6 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
-import me.manga.kira.sources.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.model.SourceConfigDocument
 
 /**
  * Schema + referential validation of a parsed [SourceConfigDocument], run before any source from it

@@ -1,4 +1,4 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

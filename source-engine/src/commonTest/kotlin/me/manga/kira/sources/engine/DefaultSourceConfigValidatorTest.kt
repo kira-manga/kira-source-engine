@@ -1,12 +1,12 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
-import me.manga.kira.sources.contracts.SourceConfigParser
-import me.manga.kira.sources.contracts.model.EndpointSpec
-import me.manga.kira.sources.contracts.model.FieldSpec
-import me.manga.kira.sources.contracts.model.IconSpec
-import me.manga.kira.sources.contracts.model.SourceConfig
-import me.manga.kira.sources.contracts.model.SourceConfigDocument
-import me.manga.kira.sources.contracts.model.TransformSpec
+import me.manga.kira.source.contracts.SourceConfigParser
+import me.manga.kira.source.contracts.model.EndpointSpec
+import me.manga.kira.source.contracts.model.FieldSpec
+import me.manga.kira.source.contracts.model.IconSpec
+import me.manga.kira.source.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.model.TransformSpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -24,7 +24,7 @@ class DefaultSourceConfigValidatorTest {
 
     @Test
     fun the_golden_document_validates() {
-        val document = (SourceConfigParser.parse(GOLDEN_CONFIG_JSON) as me.manga.kira.sources.contracts.SourceEngineResult.Success).value
+        val document = (SourceConfigParser.parse(GOLDEN_CONFIG_JSON) as me.manga.kira.source.contracts.SourceEngineResult.Success).value
         assertTrue(validator.validate(document).isValid)
     }
 
@@ -207,7 +207,7 @@ class DefaultSourceConfigValidatorTest {
                       "trustedHosts":["cdn.azora-images.net"]
                     }]}
                     """.trimIndent(),
-                ) as me.manga.kira.sources.contracts.SourceEngineResult.Success
+                ) as me.manga.kira.source.contracts.SourceEngineResult.Success
             ).value.sources.single()
         assertEquals("UNDER_MAINTENANCE", withFields.siteState)
         assertEquals("disabled", withFields.lifecycle)
@@ -220,7 +220,7 @@ class DefaultSourceConfigValidatorTest {
             (
                 SourceConfigParser.parse(
                     """{"schemaVersion":1,"sources":[{"api":"Old","language":"en","baseUrl":"https://x.test"}]}""",
-                ) as me.manga.kira.sources.contracts.SourceEngineResult.Success
+                ) as me.manga.kira.source.contracts.SourceEngineResult.Success
             ).value.sources.single()
         assertEquals("WORKING", withoutFields.siteState)
         assertEquals("active", withoutFields.lifecycle)

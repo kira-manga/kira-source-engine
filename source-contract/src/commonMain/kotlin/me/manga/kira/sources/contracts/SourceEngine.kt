@@ -1,4 +1,4 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
 /**
  * Platform-neutral execution surface shared by mobile runtime and backend previews.

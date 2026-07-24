@@ -1,8 +1,8 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
 import kotlinx.serialization.json.Json
-import me.manga.kira.sources.contracts.model.SourceConfig
-import me.manga.kira.sources.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.model.SourceConfigDocument
 
 /**
  * Compatibility parser for trusted bundled/cached source JSON. Strict administrative authoring and

@@ -1,6 +1,6 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
-import me.manga.kira.sources.contracts.model.TransformSpec
+import me.manga.kira.source.contracts.model.TransformSpec
 
 /**
  * The library of generic, named string transforms a config may chain onto an extracted field. Every

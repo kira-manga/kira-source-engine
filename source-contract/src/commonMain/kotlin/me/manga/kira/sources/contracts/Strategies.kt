@@ -1,4 +1,4 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
 /**
  * The governance surface over the generic strategies the engine ships. A config may only reference

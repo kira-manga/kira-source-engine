@@ -1,8 +1,8 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
-import me.manga.kira.sources.contracts.StrategyRegistry
-import me.manga.kira.sources.engine.internal.DateStrategies
-import me.manga.kira.sources.engine.internal.Transforms
+import me.manga.kira.source.contracts.StrategyRegistry
+import me.manga.kira.source.engine.internal.DateStrategies
+import me.manga.kira.source.engine.internal.Transforms
 
 /**
  * The set of generic strategies THIS build ships. The validator consults it to reject any config

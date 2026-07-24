@@ -1,4 +1,4 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
 /**
  * `{placeholder}` substitution for URL templates and image/url field templates. Unknown placeholders

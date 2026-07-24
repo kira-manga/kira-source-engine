@@ -1,11 +1,11 @@
 package me.manga.kira.sources.testkit
 
-import me.manga.kira.sources.contracts.SourceBaseUrlProvider
-import me.manga.kira.sources.contracts.SourceHeaderProvider
-import me.manga.kira.sources.contracts.SourceHttpMethod
-import me.manga.kira.sources.contracts.SourceRequest
-import me.manga.kira.sources.contracts.SourceResponse
-import me.manga.kira.sources.contracts.SourceTransport
+import me.manga.kira.source.contracts.SourceBaseUrlProvider
+import me.manga.kira.source.contracts.SourceHeaderProvider
+import me.manga.kira.source.contracts.SourceHttpMethod
+import me.manga.kira.source.contracts.SourceRequest
+import me.manga.kira.source.contracts.SourceResponse
+import me.manga.kira.source.contracts.SourceTransport
 
 /**
  * Exact request key used by [FixtureSourceTransport].

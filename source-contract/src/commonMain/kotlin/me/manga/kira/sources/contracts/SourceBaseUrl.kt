@@ -1,4 +1,4 @@
-package me.manga.kira.sources.contracts
+package me.manga.kira.source.contracts
 
 /**
  * Returns the normalized host of an absolute HTTP(S) source URL, or `null` when [value] is not a

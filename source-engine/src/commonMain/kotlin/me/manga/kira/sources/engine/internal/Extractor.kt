@@ -1,4 +1,4 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
 import com.fleeksoft.ksoup.Ksoup
 import com.fleeksoft.ksoup.nodes.Document
@@ -6,12 +6,12 @@ import com.fleeksoft.ksoup.nodes.Element
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import me.manga.kira.sources.contracts.model.EndpointSpec
-import me.manga.kira.sources.contracts.model.FieldSpec
+import me.manga.kira.source.contracts.model.EndpointSpec
+import me.manga.kira.source.contracts.model.FieldSpec
 
 /**
  * A single matched item (a JSON node or an HTML element) plus the rules for pulling string fields out
- * of it. Hides the JSON-vs-HTML distinction so [me.manga.kira.sources.engine.GenericSourceClient]
+ * of it. Hides the JSON-vs-HTML distinction so [me.manga.kira.source.engine.GenericSourceClient]
  * maps to domain models with one code path.
  */
 internal interface ItemScope {

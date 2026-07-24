@@ -1,4 +1,4 @@
-package me.manga.kira.sources.engine.internal
+package me.manga.kira.source.engine.internal
 
 import kotlinx.serialization.json.Json
 import kotlin.test.Test

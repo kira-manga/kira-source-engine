@@ -1,14 +1,14 @@
-package me.manga.kira.sources.engine
+package me.manga.kira.source.engine
 
-import me.manga.kira.sources.contracts.SourceConfigParser
-import me.manga.kira.sources.contracts.SourceEngineResult
-import me.manga.kira.sources.contracts.model.EndpointSpec
-import me.manga.kira.sources.contracts.model.FilterConditionSpec
-import me.manga.kira.sources.contracts.model.FilterDefinition
-import me.manga.kira.sources.contracts.model.FilterOptionSpec
-import me.manga.kira.sources.contracts.model.FilterRequestSpec
-import me.manga.kira.sources.contracts.model.SourceConfig
-import me.manga.kira.sources.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.SourceConfigParser
+import me.manga.kira.source.contracts.SourceEngineResult
+import me.manga.kira.source.contracts.model.EndpointSpec
+import me.manga.kira.source.contracts.model.FilterConditionSpec
+import me.manga.kira.source.contracts.model.FilterDefinition
+import me.manga.kira.source.contracts.model.FilterOptionSpec
+import me.manga.kira.source.contracts.model.FilterRequestSpec
+import me.manga.kira.source.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.model.SourceConfigDocument
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
