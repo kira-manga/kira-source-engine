@@ -24,6 +24,7 @@ internal object DateStrategies {
         }
     }
 
+    @OptIn(kotlin.time.ExperimentalTime::class)
     private fun epochToDate(millis: Long): LocalDate? =
         runCatching { Instant.fromEpochMilliseconds(millis).toLocalDateTime(TimeZone.UTC).date }.getOrNull()
 }

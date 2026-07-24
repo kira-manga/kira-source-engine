@@ -1,10 +1,10 @@
 [versions]
-kotlin = "2.4.0"
+kotlin = "2.2.21"
 agp = "9.2.1"
-serialization = "1.11.0"
-coroutines = "1.11.0"
-datetime = "0.8.0"
-ksoup = "0.2.6"
+serialization = "1.9.0"
+coroutines = "1.10.2"
+datetime = "0.7.1"
+ksoup = "0.2.5"
 
 [libraries]
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }

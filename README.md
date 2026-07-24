@@ -10,10 +10,15 @@ Platform-neutral Kotlin Multiplatform contracts and execution for Kira’s confi
 
 The mobile app and backend pin the same immutable package version. Networking is supplied through a port, and the backend alone owns canonical JSON, source publication, checksums, and signatures.
 
+The package is built with Kotlin 2.2 while its public API and language level are capped at Kotlin
+2.1. This is intentional: the Spring backend uses Kotlin 2.1 and the mobile app uses Kotlin 2.4,
+so both consumers can read the same published metadata without skipping compiler checks.
+
 ## Verification
 
 ```bash
-./gradlew check publishToMavenLocal
+ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew check
+ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew -PVERSION_NAME=0.1.0 publishToMavenLocal
 ```
 
 Release tags use the exact immutable Maven version: tag `v0.1.0` publishes version `0.1.0`.
