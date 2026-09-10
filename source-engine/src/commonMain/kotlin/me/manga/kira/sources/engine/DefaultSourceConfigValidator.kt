@@ -7,6 +7,7 @@ import me.manga.kira.source.contracts.model.FilterDefinition
 import me.manga.kira.source.contracts.model.IconSpec
 import me.manga.kira.source.contracts.model.SourceConfig
 import me.manga.kira.source.contracts.model.SourceConfigDocument
+import me.manga.kira.source.engine.internal.HeaderNamePolicy
 
 /**
  * Schema + referential validator. Runs after signature verification, before any source is trusted.
@@ -326,7 +327,7 @@ class DefaultSourceConfigValidator(
         for (option in filter.options) {
             if (option.value.isBlank()) errors += "$ftag options: an option has a blank value"
             if (option.value.isNotBlank() && !seenValues.add(option.value)) {
-                errors += "$ftag options: duplicate option value '${option.value}' (selection would be ambiguous)"
+                errors += "$ftag options: duplicate option value (selection would be ambiguous)"
             }
         }
     }
@@ -342,7 +343,7 @@ class DefaultSourceConfigValidator(
                 errors += "$ftag default: multiselect uses 'defaults', not 'default'"
             }
             for (value in filter.defaults) {
-                if (value !in optionValues) errors += "$ftag defaults: '$value' is not a declared option value"
+                if (value !in optionValues) errors += "$ftag defaults: value is not a declared option value"
             }
         } else {
             if (filter.defaults.isNotEmpty()) {
@@ -351,15 +352,15 @@ class DefaultSourceConfigValidator(
             when (filter.type) {
                 "select" ->
                     if (filter.default.isNotBlank() && filter.default !in optionValues) {
-                        errors += "$ftag default: '${filter.default}' is not a declared option value"
+                        errors += "$ftag default: value is not a declared option value"
                     }
                 "toggle" ->
                     if (filter.default !in setOf("", "true", "false")) {
-                        errors += "$ftag default: toggle default must be 'true' or 'false', not '${filter.default}'"
+                        errors += "$ftag default: toggle default must be 'true' or 'false'"
                     }
                 "number" ->
                     if (filter.default.isNotBlank() && filter.default.toDoubleOrNull()?.isFinite() != true) {
-                        errors += "$ftag default: '${filter.default}' is not numeric"
+                        errors += "$ftag default: value is not numeric"
                     }
             }
         }
@@ -383,6 +384,17 @@ class DefaultSourceConfigValidator(
             errors += "$ftag request.target: unknown '${request.target}' (expected one of $SUPPORTED_FILTER_TARGETS)"
         }
         if (request.param.isBlank()) errors += "$ftag request.param: must not be blank"
+        // Check the submitted name even when the filter is hidden, optional, or currently empty.
+        if (request.target == "header") {
+            when {
+                !HeaderNamePolicy.isHttpFieldName(request.param) ->
+                    errors += "$ftag request.param: header name must be a non-empty ASCII HTTP token without whitespace"
+                HeaderNamePolicy.isForbidden(request.param) ->
+                    errors += "$ftag request.param: forbidden header names are not allowed for filters"
+                HeaderNamePolicy.isSensitive(request.param) ->
+                    errors += "$ftag request.param: sensitive header names are not supported for filters"
+            }
+        }
         if (request.encode !in SUPPORTED_FILTER_ENCODINGS) {
             errors += "$ftag request.encode: unknown '${request.encode}' (expected one of $SUPPORTED_FILTER_ENCODINGS)"
         }
@@ -493,7 +505,7 @@ class DefaultSourceConfigValidator(
             if (possible != null) {
                 for (value in condition.anyOf) {
                     if (value !in possible) {
-                        errors += "$ftag visibleWhen: anyOf value '$value' is not a possible value of " +
+                        errors += "$ftag visibleWhen: anyOf value is not a possible value of " +
                             "filter '${condition.filter}'"
                     }
                 }
@@ -529,7 +541,7 @@ class DefaultSourceConfigValidator(
         }
         val overlap = filter.defaults.toSet() intersect included.defaults.toSet()
         if (overlap.isNotEmpty()) {
-            errors += "$ftag excludeOf: defaults overlap with filter '${filter.excludeOf}' ($overlap) — " +
+            errors += "$ftag excludeOf: defaults overlap with filter '${filter.excludeOf}' — " +
                 "a value cannot default to included AND excluded"
         }
     }
