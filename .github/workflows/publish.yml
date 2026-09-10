@@ -1,43 +1,18 @@
-name: Publish shared source engine
+name: Package publication disabled (Engine6 containment)
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
 
 jobs:
-  publish:
-    runs-on: macos-15
-    timeout-minutes: 30
+  refuse-publication:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
     steps:
-      - name: Check out source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up Java
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Validate immutable release tag
+      - name: Refuse remote package publication
         shell: bash
         run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$(git tag --points-at HEAD)" = "$GITHUB_REF_NAME"
-          printf 'VERSION_NAME=%s\n' "$version" >> "$GITHUB_ENV"
-
-      - name: Verify before publication
-        run: ./gradlew --no-daemon check -PVERSION_NAME="$VERSION_NAME"
-
-      - name: Publish immutable Maven packages
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew --no-daemon publish -PVERSION_NAME="$VERSION_NAME"
+          printf '%s\n' '::error::Remote package publication is disabled by Engine6 current-source containment.'
+          printf '%s\n' 'No checkout, build or upload is performed. See README.md for the open release gates.'
+          exit 1
