@@ -186,7 +186,7 @@ class DefaultSourceConfigValidatorFilterTest {
     fun option_rules_duplicate_values_blank_values_and_type_mismatches_are_rejected() {
         assertRejected(
             source(listOf(select(options = listOf(FilterOptionSpec("a"), FilterOptionSpec("a"))))),
-            "duplicate option value 'a'",
+            "duplicate option value (selection would be ambiguous)",
         )
         assertRejected(source(listOf(select(options = listOf(FilterOptionSpec(" "))))), "blank value")
         assertRejected(source(listOf(select(options = emptyList()))), "requires at least one option")
@@ -210,8 +210,8 @@ class DefaultSourceConfigValidatorFilterTest {
 
     @Test
     fun invalid_defaults_are_rejected() {
-        assertRejected(source(listOf(select(default = "nope"))), "default: 'nope' is not a declared option value")
-        assertRejected(source(listOf(multiselect(defaults = listOf("nope")))), "defaults: 'nope' is not a declared option value")
+        assertRejected(source(listOf(select(default = "nope"))), "default: value is not a declared option value")
+        assertRejected(source(listOf(multiselect(defaults = listOf("nope")))), "defaults: value is not a declared option value")
         assertRejected(source(listOf(multiselect().copy(default = "action"))), "multiselect uses 'defaults'")
         assertRejected(source(listOf(select().copy(defaults = listOf("latest")))), "only multiselect uses 'defaults'")
         assertRejected(
@@ -240,7 +240,7 @@ class DefaultSourceConfigValidatorFilterTest {
                     ),
                 ),
             ),
-            "default: 'high' is not numeric",
+            "default: value is not numeric",
         )
         for (nonFinite in listOf("NaN", "Infinity", "-Infinity")) {
             assertRejected(
@@ -279,6 +279,173 @@ class DefaultSourceConfigValidatorFilterTest {
             "request.encode: unknown 'pipe'",
         )
         assertRejected(source(listOf(select(request = FilterRequestSpec(target = "query", param = " ")))), "param: must not be blank")
+    }
+
+    @Test
+    fun header_filter_names_must_be_exact_ascii_http_tokens() {
+        val valid = select(id = "header", request = FilterRequestSpec(target = "header", param = "X-Lang"))
+        assertEquals(emptyList(), errorsOf(source(listOf(valid))))
+        val field = "source 'FilterSource': filters: filter 'header': request.param:"
+        val invalidNames =
+            listOf(
+                "", " ", " X-Lang", "X-Lang ", "X Lang", "X\tLang", "X\r\nLang",
+                "X\u0000Lang", "X\u007fLang", "X-Lang\u00e9", "X:Lang", "genre[]",
+            )
+        for (name in invalidNames) {
+            val expected =
+                buildList {
+                    if (name.isBlank()) add("$field must not be blank")
+                    add("$field header name must be a non-empty ASCII HTTP token without whitespace")
+                }
+            assertEquals(expected, errorsOf(source(listOf(valid.copy(request = valid.request.copy(param = name))))))
+        }
+    }
+
+    @Test
+    fun unsafe_header_names_are_rejected_independently_of_control_values_or_visibility() {
+        val request = FilterRequestSpec(target = "header", param = "X-Lang")
+        val text = FilterDefinition(id = "header", label = "Header", type = "text", request = request)
+        val optionOnly = select(id = "header", request = request)
+        val csv =
+            multiselect(id = "header", defaults = listOf("action")).copy(
+                required = true,
+                request = request.copy(encode = "csv", delimiter = ";"),
+            )
+        val toggle =
+            text.copy(
+                type = "toggle",
+                default = "false",
+                request = request.copy(trueValue = "on", falseValue = "off", omitIfEmpty = false),
+            )
+        val number = text.copy(type = "number")
+        // With the controller's default, this otherwise-valid filter is hidden.
+        val controller = select(id = "controller", default = "latest")
+        val hidden = text.copy(visibleWhen = listOf(FilterConditionSpec(filter = "controller", anyOf = listOf("views"))))
+        val forbidden = "forbidden header names are not allowed for filters"
+        val sensitive = "sensitive header names are not supported for filters"
+        val cases =
+            listOf(
+                Triple("cOoKiE", optionOnly, forbidden),
+                Triple("sEt-CoOkIe", toggle, forbidden),
+                Triple("pRoXy-AuThOrIzAtIoN", number, forbidden),
+                Triple("aUtHoRiZaTiOn", text, sensitive),
+                Triple("X-aPi-KeY", optionOnly, sensitive),
+                Triple("aPi-KeY", csv, sensitive),
+                Triple("X-aUtH-tOkEn", toggle, sensitive),
+                Triple("X-ReFrEsH-ToKeN-Mode", number, sensitive),
+                Triple("X-Client-SeCrEt", hidden, sensitive),
+                Triple("X-User-PaSsWoRd", text, sensitive),
+                Triple("Authorization", text.copy(default = "Bearer null"), sensitive),
+            )
+        for ((name, safe, finding) in cases) {
+            // No invalid default, encoding or cross-reference may make this rejection vacuous.
+            assertEquals(emptyList(), errorsOf(source(listOf(controller, safe))))
+            val unsafe = safe.copy(request = safe.request.copy(param = name))
+            assertEquals(
+                listOf("source 'FilterSource': filters: filter 'header': request.param: $finding"),
+                errorsOf(source(listOf(controller, unsafe))),
+            )
+        }
+    }
+
+    @Test
+    fun safe_header_tokens_and_static_public_placeholders_remain_accepted() {
+        val names = listOf("X-Lang", "X-Content-Lang", "aZ09", "!#\$%&'*+-.^_`|~", "X-Cookie-Count", "X-Authorization-Mode")
+        for (name in names) {
+            val filter = select(id = "header", default = "latest", request = FilterRequestSpec(target = "header", param = name))
+            assertEquals(
+                emptyList(),
+                errorsOf(source(listOf(filter)).copy(headers = mapOf("Authorization" to "Bearer null"))),
+            )
+        }
+    }
+
+    @Test
+    fun rejected_header_filters_do_not_echo_synthetic_values_anywhere_in_the_validation_result() {
+        val duplicate = "SYNTHETIC_DUPLICATE_OPTION_21"
+        val selectDefault = "SYNTHETIC_SELECT_DEFAULT_21"
+        val multiselectDefault = "SYNTHETIC_MULTISELECT_DEFAULT_21"
+        val toggleDefault = "SYNTHETIC_TOGGLE_DEFAULT_21"
+        val numberDefault = "SYNTHETIC_NUMBER_DEFAULT_21"
+        val conditionValue = "SYNTHETIC_CONDITION_VALUE_21"
+        val trueValue = "SYNTHETIC_TOGGLE_TRUE_21"
+        val falseValue = "SYNTHETIC_TOGGLE_FALSE_21"
+        val delimiter = "SYNTHETIC_CSV_DELIMITER_21"
+        val overlap = "SYNTHETIC_OVERLAPPING_DEFAULT_21"
+        val headerName = "X-Secret-SYNTHETIC_HEADER_NAME_21"
+        val request = FilterRequestSpec(target = "header", param = "Authorization")
+        val filters =
+            listOf(
+                select(
+                    id = "selected",
+                    options = listOf(FilterOptionSpec(duplicate), FilterOptionSpec(duplicate)),
+                    default = selectDefault,
+                    request = request,
+                ),
+                multiselect(
+                    id = "included",
+                    options = listOf(FilterOptionSpec("action"), FilterOptionSpec(overlap)),
+                    defaults = listOf(multiselectDefault, overlap),
+                ).copy(request = request.copy(param = "X-Api-Key", encode = "csv", delimiter = delimiter)),
+                FilterDefinition(
+                    id = "switch",
+                    label = "Switch",
+                    type = "toggle",
+                    default = toggleDefault,
+                    request = request.copy(param = "Api-Key", trueValue = trueValue, falseValue = falseValue),
+                ),
+                FilterDefinition(
+                    id = "quantity",
+                    label = "Quantity",
+                    type = "number",
+                    default = numberDefault,
+                    request = request.copy(param = headerName),
+                ),
+                FilterDefinition(
+                    id = "dependent",
+                    label = "Dependent",
+                    type = "text",
+                    request = request.copy(param = "X-Lang"),
+                    visibleWhen = listOf(FilterConditionSpec(filter = "selected", anyOf = listOf(conditionValue))),
+                ),
+                multiselect(
+                    id = "excluded",
+                    options = listOf(FilterOptionSpec(overlap)),
+                    defaults = listOf(overlap),
+                    excludeOf = "included",
+                ).copy(request = request.copy(param = "X-Excluded", encode = "csv")),
+            )
+        val result = validator.validate(doc(source(filters)))
+        assertFalse(result.isValid)
+        val sensitive = "request.param: sensitive header names are not supported for filters"
+        assertEquals(
+            listOf(
+                "filter 'selected': options: duplicate option value (selection would be ambiguous)",
+                "filter 'selected': default: value is not a declared option value",
+                "filter 'selected': $sensitive",
+                "filter 'included': defaults: value is not a declared option value",
+                "filter 'included': $sensitive",
+                "filter 'switch': default: toggle default must be 'true' or 'false'",
+                "filter 'switch': $sensitive",
+                "filter 'quantity': default: value is not numeric",
+                "filter 'quantity': $sensitive",
+                "filter 'dependent': visibleWhen: anyOf value is not a possible value of filter 'selected'",
+                "filter 'excluded': excludeOf: defaults overlap with filter 'included' — " +
+                    "a value cannot default to included AND excluded",
+            ).map { "source 'FilterSource': filters: $it" },
+            result.errors,
+        )
+        // Check the complete result, not just the new name-policy diagnostic. Structural IDs are
+        // deliberately valid and contain no sentinel: this is not arbitrary-field redaction.
+        val diagnosticText = result.toString()
+        val sentinels =
+            listOf(
+                duplicate, selectDefault, multiselectDefault, toggleDefault, numberDefault,
+                conditionValue, trueValue, falseValue, delimiter, overlap, headerName,
+            )
+        for (sentinel in sentinels) {
+            assertFalse(diagnosticText.contains(sentinel), "validation result must not echo synthetic filter data")
+        }
     }
 
     @Test
@@ -458,7 +625,7 @@ class DefaultSourceConfigValidatorFilterTest {
                     ),
                 ),
             ),
-            "anyOf value 'nonsense' is not a possible value",
+            "anyOf value is not a possible value",
         )
     }
 

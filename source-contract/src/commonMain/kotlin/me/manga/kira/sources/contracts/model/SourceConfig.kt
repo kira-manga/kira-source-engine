@@ -294,9 +294,11 @@ data class FilterRequestSpec(
     /** `"query"` | `"path"` | `"form"` | `"header"` | `"body-json"`. */
     val target: String,
     /**
-     * query/form/header: the parameter name (may be `"genre[]"` — percent-encoded on the wire for
-     * query). path/body-json: the template placeholder name (`[a-zA-Z0-9_]+`, must not shadow a
-     * reserved engine var).
+     * query/form: the parameter name (may be `"genre[]"` — percent-encoded on the wire for query).
+     * header: an exact non-empty ASCII HTTP token (no whitespace or brackets). Forbidden and
+     * credential-sensitive headers are unsupported as filters, even with public placeholders.
+     * path/body-json: the template placeholder name (`[a-zA-Z0-9_]+`, must not shadow a reserved
+     * engine var).
      */
     val param: String,
     /** `"single"` | `"csv"` | `"repeat"` (query/form) | `"json-array"` (body-json). */

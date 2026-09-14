@@ -43,16 +43,3 @@ kotlin {
         }
     }
 }
-
-publishing {
-    repositories {
-        maven {
-            name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/kira-manga/kira-source-engine")
-            credentials {
-                username = System.getenv("GITHUB_ACTOR") ?: System.getenv("KIRA_PACKAGES_USER")
-                password = System.getenv("GITHUB_TOKEN") ?: System.getenv("KIRA_PACKAGES_READ_TOKEN")
-            }
-        }
-    }
-}
