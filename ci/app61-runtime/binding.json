@@ -1,0 +1,35 @@
+{
+  "schema": "app61-runtime-archive-layout-v1",
+  "issueCommit": "af2689af35b56fd071c1d88a8fafad5c8eb5cc9e",
+  "issueTree": "204d3e20f41a0c90121e55435f944cb32bbf179d",
+  "issueParent": "42e612b1d354dc2b46e5f90cac6c3795859dcdb8",
+  "sourceFreezeSha256": "8789de731f5ab14c104770fb34ceb29fae4bd542284c6a5e13f3cdfedb9c5832",
+  "candidateFiles": {
+    ".github/workflows/android-internal-testing.yml": "3e4a82b8a1d3f454a9dcb7a35374cb5acd468785392d7ef8020744c174c74ffc",
+    ".github/workflows/ci.yml": "99042f9f6f851cb3581051029498bfb56946b80cbc88ca7e72494c4bf62c214f",
+    ".github/workflows/testflight.yml": "290eab1da2280ceabdc184945f737fefd5628bf076c7c73ffa662b6d5d367daf",
+    "release/verified-tools.json": "45cb3adf40266adeb2c8170435451182881a3fdad9dca04ee99f5e35c3728faa",
+    "release/TOOLCHAIN_INPUTS.md": "13280d2eabbf58247a869391377cb6f73588dd5da57c081169de59b80ea2bc30",
+    "scripts/release/install-toolchain-inputs.py": "8f2bc35a3a159ba0f9d2db7693529032fbed0d3c91f7b9cf7e423d65cc02b173",
+    "scripts/release/verify-toolchain-inputs.rb": "f48efdb97915b292b1698d7ca0146b79cdd772df6a4cac2f498c9327c76754fe",
+    "scripts/release/tests/toolchain-inputs-test.rb": "81f27a1b29312a16d30aaabf8acd315a9e91b9456832ac2306dcfa117070d268",
+    "scripts/release/tests/runtime-inputs-test.py": "04cc6e30499c0704bbbb2eeda434633e8b0bf4e65cdf7eb83e3a2e31bed2365f"
+  },
+  "scope": "actual archive intake and direct runtime probes only; no setup-ruby Action, gems, Gradle, SwiftPM, app build or credentials",
+  "carrierBase": "686fb6e0b7d4f09914471860963a61c77e7d4f01",
+  "branch": "validation/app61-runtime-inputs-20260915-01",
+  "ownerSha256": "9f69c87182eba29030fcd65c49b4e8459a41749440dab9767f3fbfe0c02db6cf",
+  "commandsSha256": "4134f5dcc39aa7b7a182bf45701dc5192e7e5c0f4ff07065a948cb2c2b84acc1",
+  "deadlinesSeconds": {
+    "work": 1320,
+    "controller": 1620,
+    "cleanup": 240,
+    "stop": 40,
+    "java": 300,
+    "ruby": 300,
+    "native": 720,
+    "probe": 30
+  },
+  "artifactRetentionDays": 3,
+  "linuxOwnerSha256": "8ec8513e98b5f5df6a41cd43450ed6166f4de51e625cf16b22debd7f4cafffee"
+}

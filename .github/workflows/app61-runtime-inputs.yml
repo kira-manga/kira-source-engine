@@ -1,0 +1,77 @@
+name: App61 NONSHIPPING runtime archives and independent App70 tool probe
+
+on:
+  push:
+    branches: [validation/app61-runtime-inputs-20260915-01]
+    paths: [.github/workflows/app61-runtime-inputs.yml, 'ci/app61-runtime/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kira-app61-runtime-archive-layout
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: github.repository == 'kira-manga/kira-source-engine' && github.event_name == 'push' && github.ref == 'refs/heads/validation/app61-runtime-inputs-20260915-01' && github.run_attempt == 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            host: linux-x64
+          - runner: macos-26
+            host: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out only this reviewed public carrier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check out the exact reviewed App61 issue checkpoint
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: kira-manga/kira-app
+          ref: af2689af35b56fd071c1d88a8fafad5c8eb5cc9e
+          path: app
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authenticate unique runtime archives, probe real runtimes, clean owned inputs
+        id: archives
+        timeout-minutes: 29
+        shell: bash
+        # The existing hosted Python owns commands; production installers still
+        # execute through /usr/bin/python3. No runtime, gem or SDK setup action.
+        run: python3 -I -B control/ci/app61-runtime/qualify.py --qualify-archives
+
+      - name: Retain bounded App61 evidence, including incomplete-cleanup failures
+        if: ${{ always() && steps.archives.outputs.retention_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app61-runtime-${{ matrix.host }}-${{ github.run_id }}
+          path: app61-runtime-reports/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Independently qualify the exact simulator log tool only
+        id: app70
+        if: ${{ always() && !cancelled() && matrix.host == 'macos-arm64' && steps.archives.outputs.cleanup_barrier_absent == 'true' }}
+        timeout-minutes: 8
+        shell: bash
+        run: python3 -I -B control/ci/app61-runtime/app70-runtime-log.py --tool-only
+
+      - name: Retain separate App70 tool-only evidence
+        if: ${{ always() && steps.app70.outputs.retention_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app70-runtime-log-${{ github.run_id }}
+          path: app70-reports/
+          if-no-files-found: error
+          retention-days: 3
