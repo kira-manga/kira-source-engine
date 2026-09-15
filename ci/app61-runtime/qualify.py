@@ -68,7 +68,8 @@ def main():
     host = runtime.host()
     require((os.environ.get("RUNNER_OS"), os.environ.get("RUNNER_ARCH")) ==
             (("Linux", "X64") if host == "linux-x64" else ("macOS", "ARM64")), "Wrong hosted architecture")
-    roles = ("java",) if host == "macos-arm64" else ("ruby",)
+    require(host == "linux-x64", "Linux Ruby qualification only")
+    roles = ("ruby",)
     os.umask(0o077)
     temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
     identity(temporary)

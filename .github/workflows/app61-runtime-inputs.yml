@@ -1,8 +1,8 @@
-name: App61 NONSHIPPING failed runtime roles only
+name: App61 NONSHIPPING Linux Ruby permission policy
 
 on:
   push:
-    branches: [validation/app61-runtime-diagnostics-20260915-01]
+    branches: [validation/app61-ruby-permission-policy-20260915-01]
     paths: [.github/workflows/app61-runtime-inputs.yml, 'ci/app61-runtime/**']
 
 permissions:
@@ -14,15 +14,13 @@ concurrency:
 
 jobs:
   qualify:
-    if: github.repository == 'kira-manga/kira-source-engine' && github.event_name == 'push' && github.ref == 'refs/heads/validation/app61-runtime-diagnostics-20260915-01' && github.run_attempt == 1
+    if: github.repository == 'kira-manga/kira-source-engine' && github.event_name == 'push' && github.ref == 'refs/heads/validation/app61-ruby-permission-policy-20260915-01' && github.run_attempt == 1
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             host: linux-x64
-          - runner: macos-26
-            host: macos-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -38,12 +36,12 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: kira-manga/kira-app
-          ref: cceaf4f6cce4cb8786a69ab22964518253ac2c06
+          ref: 821cac6770aca67c52e9c01e60167acc1cf879eb
           path: app
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Qualify only Linux Ruby or macOS Java, then clean owned inputs
+      - name: Qualify only Linux Ruby, then clean owned inputs
         id: archives
         timeout-minutes: 14
         shell: bash
