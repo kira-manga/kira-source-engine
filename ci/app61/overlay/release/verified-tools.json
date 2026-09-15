@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "actions": {
+    "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
+    "actions/setup-java": "cf277c60eb25467037889841efdb72551f06f6c3",
+    "gradle/actions/setup-gradle": "ed408507eac070d1f99cc633dbcf757c94c7933a",
+    "ruby/setup-ruby": "bec3f19a76460dbe12f60def7d1a77585f07516c",
+    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  },
+  "gradle": {
+    "version": "9.6.1",
+    "distribution_url": "https://services.gradle.org/distributions/gradle-9.6.1-bin.zip",
+    "distribution_sha256": "9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14",
+    "files": {
+      "gradlew": "e01b5c97892572c82405c02b96a3382379100e7d825ce7c48883d95c26928750",
+      "gradlew.bat": "4e193538b4ddccbee0c05d6383731b647945c146d16d8fe243b4ff716867896f",
+      "gradle/wrapper/gradle-wrapper.jar": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7",
+      "gradle/wrapper/gradle-wrapper.properties": "556f4aa5f360e35fca77b010b306307765d4f4915a82a612035cd5cfb7a587cb"
+    },
+    "dependency_graph": {
+      "metadata_sha256": null,
+      "lockfiles": {},
+      "files": {
+        "app/build.gradle.kts": "aa1606b64784191ef4ab01c4b275b938707132aeb119506e5bd8784f3a88be8c",
+        "build.gradle.kts": "b22544870c22bf616c4f072ad415513c7b346524e3b9a2b4001a6514424f24dd",
+        "composeApp/build.gradle.kts": "e9c70fdecd14f1bf7678e2d58d0141d73e09ca42b5b88082ade338d835ba35f3",
+        "core/build.gradle.kts": "0f6a9398471461c285e82d0e1a9147a13790fef382eb10b687766c57d0b9de54",
+        "data/build.gradle.kts": "b1691c1fb5d2fcb620bca9af09949e67764833b2bd9a2161b995eea433222334",
+        "data/download/build.gradle.kts": "346ae3f50c5c1477ff11dfd11089bec2d26f88626684b808784c6562092f406d",
+        "data/local/build.gradle.kts": "af618e441f024af7239e476e48098c9f7ec4e09bb358e1055e6c787f81aec8cb",
+        "data/remote/build.gradle.kts": "2091e27c030a7b0b97cd3511eb4c92ad848b6f578ca66863063b0cf508086b52",
+        "desktopApp/build.gradle.kts": "33cbe01c54993042df2ce3bc5bf20dedaf23256969b1c3097ad77a226bdc99ba",
+        "domain/build.gradle.kts": "ade4c1e77d35a3e57879b45159e2d10c96d0c33f879d53df4bc085f0208bb85f",
+        "gradle.properties": "fbcfeeae64de28e5a2756cd74a01f1c8b9eceedf395d5c114573c0aea6fc9f2a",
+        "gradle/libs.versions.toml": "07762523b2f0ed601389a606f7d1203f3019a2702a82b29b559ce5dc8f7e08e9",
+        "platform/build.gradle.kts": "88de9859b66d47df9df0ff6765017939537a856292ed808697c4121f39109a94",
+        "presentation/build.gradle.kts": "e084af1ba5a9906e7639f49f55d004075d91cf0c5cf32adcc493da960d432b92",
+        "settings.gradle.kts": "7a342edcd1c99ffedb8528f3aece72372aba670c375c30a27f36c9ec1e20917d",
+        "sources/config/build.gradle.kts": "63db5f2564a6fdf21ccb7bdfa9bbafc8cdb395d08606a6f77417a1ae35ba203c",
+        "sources/contracts/build.gradle.kts": "cd0ead53d56a2072fec38d047f0a6d2a8972e205ba15b005df2060907232597b",
+        "sources/engine/build.gradle.kts": "d71d385ce90d99ac3b7a2a17d7f5cd44fa01fd529f35868c87df9476f49d1954",
+        "sources/legacy/build.gradle.kts": "ca9b5ecaa8294db0eda6f2ce3cced2a16d80089b4a723c4eeddf707d6e359e7f",
+        "ui/build.gradle.kts": "83c84f6f1d0cd94df6cde744804d7e8abd3c2bfe7fe26184255ab3ade8792838"
+      }
+    }
+  },
+  "xcodegen": {
+    "version": "2.46.0",
+    "url": "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip",
+    "sha256": "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806",
+    "binary_path": "xcodegen/bin/xcodegen",
+    "binary_sha256": "8774da746668bc18fe74e54cbaf10f2631a1fb05947cd374179aa912f14f99db"
+  },
+  "swiftpm": {
+    "lock_sha256": "fa47d64d18b1010dc7415816f69762a4f50f50acabebdda5f55eb83b86db1dd5",
+    "firebase": {
+      "url": "https://github.com/firebase/firebase-ios-sdk",
+      "version": "12.15.0"
+    }
+  },
+  "runtime_selections": {
+    "java": {
+      "distribution": "temurin",
+      "version": "21.0.12.1+1",
+      "setup_java_version": "21.0.12+101.0.LTS"
+    },
+    "ruby": {
+      "version": "3.3.12",
+      "bundler": "4.0.16",
+      "files": {
+        "Gemfile": "0c41d832bdf61aa072c4af7dbb6c92c9de1427a474de1cf158362ae7cda9a3c2",
+        "Gemfile.lock": "25a3ea2a4d70e2806c12c1f9c6ea96ff5279e2e4f74ca65106188f289106f086"
+      }
+    },
+    "xcode": {
+      "version": "26.4.1",
+      "build": "17E202",
+      "developer_dir": "/Applications/Xcode_26.4.1.app/Contents/Developer"
+    },
+    "runners": {
+      "linux": "ubuntu-24.04",
+      "macos": "macos-26"
+    }
+  }
+}

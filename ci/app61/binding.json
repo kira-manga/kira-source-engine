@@ -1,0 +1,88 @@
+{
+  "status": "CAPTURE_ONLY_NOT_INTEGRATION",
+  "engine_base": "686fb6e0b7d4f09914471860963a61c77e7d4f01",
+  "app_public_commit": "d2617c00b54c832f427c88b9cec74bbd65ef6089",
+  "app_public_tree": "1163ffb5173d33058ab79872ee4d17a9995829e2",
+  "frozen_scaffold_base": "c6cb206448ef709e576ff87e1ff04e8ac8d43a20",
+  "frozen_scaffold_delta_sha256": "01ba3bdac05cc11f672d5df200e86c0bdffa5c5f047dbfe294e68da900e1c907",
+  "frozen_scaffold_inventory_sha256": "a24103327e25c13da571e85a0bf136014edbeb4f5dc819d33b1a54e7010c2d86",
+  "overlay": {
+    ".github/workflows/android-internal-testing.yml": {
+      "sha256": "0b15ca7cb02714199ba8a9c8876462c609ee611377ecb3e59f4aeb5e63c4e047",
+      "public_sha256": "8735d17d36c15177e4d1b9993882a288f6ddf0411409524e9849660722e4f7d3"
+    },
+    ".github/workflows/ci.yml": {
+      "sha256": "1fd8207da479ad99d7a30cf623d3e5802b71f60f662133126cfbcb21cd8ebcb9",
+      "public_sha256": "3c04d0e2e0b6d5f95e57561e9a5236b18977c7bcc1641972ce9ea25d4f1c1bbc"
+    },
+    ".github/workflows/testflight.yml": {
+      "sha256": "1f2ced3c8b9c8a8e85adfedc20318dbc10531c41dc13c8fb2329f5658c65e0cc",
+      "public_sha256": "71063d3eafa68f100169cafaeb5272ebf848d0d33831d8d66ea78d1f565164b6"
+    },
+    "iosApp/README.md": {
+      "sha256": "193f27bdb0717eae7a6beafe0efcddd8553bc73dc6961b71d64919e7f83206a1",
+      "public_sha256": "2351d96379fd53b32a1912dd806a5940f8caf791cc78abffe9bbda443e3c773f"
+    },
+    "iosApp/project.yml": {
+      "sha256": "66d03422a60a507e48ebcb9baac9553b20f694eb11e43b4a261afa83322c6018",
+      "public_sha256": "944300de9eacdd611a9c95a85130e3cf7d13661bd4d4cd0ec44913bded2d93da"
+    },
+    "release/verified-tools.json": {
+      "sha256": "ad79c972786c06858ff403bf5d5a442554306403ce108c729d9b88b5b30c68c1",
+      "public_sha256": "91e8208a47ad9cc3dc02d50fcc5f8821479e31587ab707cc758d5d0f8eae99a2"
+    },
+    "scripts/release/tests/toolchain-inputs-test.rb": {
+      "sha256": "ca7979ec9570c00fdea1d7f1c4f9eb3135cb0a146dede46ebc36ef24db788026",
+      "public_sha256": "63a9b7a346c2c496a004b560544bc25c641ee62d5ae928a6719a2aacd7684f02"
+    },
+    "scripts/release/verify-toolchain-inputs.rb": {
+      "sha256": "56e0cc4ab3de75238ca798598f5a828c86fff42e269ab56d46f4d2e7222196a5",
+      "public_sha256": "53b6f3e8154be5090cbe42ef6f2f2988095e3795223b267d01d0ac4d4b107324"
+    },
+    "settings.gradle.kts": {
+      "sha256": "7a342edcd1c99ffedb8528f3aece72372aba670c375c30a27f36c9ec1e20917d",
+      "public_sha256": "11ec5e60925a93195abcbb66dcf1090a29289f88b7ff04f3ce7b1cabfc4ec0f0"
+    }
+  },
+  "public_gradle_inputs": {
+    "app/build.gradle.kts": "aa1606b64784191ef4ab01c4b275b938707132aeb119506e5bd8784f3a88be8c",
+    "build.gradle.kts": "b22544870c22bf616c4f072ad415513c7b346524e3b9a2b4001a6514424f24dd",
+    "composeApp/build.gradle.kts": "e9c70fdecd14f1bf7678e2d58d0141d73e09ca42b5b88082ade338d835ba35f3",
+    "core/build.gradle.kts": "0f6a9398471461c285e82d0e1a9147a13790fef382eb10b687766c57d0b9de54",
+    "data/build.gradle.kts": "b1691c1fb5d2fcb620bca9af09949e67764833b2bd9a2161b995eea433222334",
+    "data/download/build.gradle.kts": "346ae3f50c5c1477ff11dfd11089bec2d26f88626684b808784c6562092f406d",
+    "data/local/build.gradle.kts": "af618e441f024af7239e476e48098c9f7ec4e09bb358e1055e6c787f81aec8cb",
+    "data/remote/build.gradle.kts": "2091e27c030a7b0b97cd3511eb4c92ad848b6f578ca66863063b0cf508086b52",
+    "desktopApp/build.gradle.kts": "33cbe01c54993042df2ce3bc5bf20dedaf23256969b1c3097ad77a226bdc99ba",
+    "domain/build.gradle.kts": "ade4c1e77d35a3e57879b45159e2d10c96d0c33f879d53df4bc085f0208bb85f",
+    "gradle.properties": "fbcfeeae64de28e5a2756cd74a01f1c8b9eceedf395d5c114573c0aea6fc9f2a",
+    "gradle/libs.versions.toml": "07762523b2f0ed601389a606f7d1203f3019a2702a82b29b559ce5dc8f7e08e9",
+    "platform/build.gradle.kts": "88de9859b66d47df9df0ff6765017939537a856292ed808697c4121f39109a94",
+    "presentation/build.gradle.kts": "e084af1ba5a9906e7639f49f55d004075d91cf0c5cf32adcc493da960d432b92",
+    "settings.gradle.kts": "11ec5e60925a93195abcbb66dcf1090a29289f88b7ff04f3ce7b1cabfc4ec0f0",
+    "sources/config/build.gradle.kts": "63db5f2564a6fdf21ccb7bdfa9bbafc8cdb395d08606a6f77417a1ae35ba203c",
+    "sources/contracts/build.gradle.kts": "cd0ead53d56a2072fec38d047f0a6d2a8972e205ba15b005df2060907232597b",
+    "sources/engine/build.gradle.kts": "d71d385ce90d99ac3b7a2a17d7f5cd44fa01fd529f35868c87df9476f49d1954",
+    "sources/legacy/build.gradle.kts": "ca9b5ecaa8294db0eda6f2ce3cced2a16d80089b4a723c4eeddf707d6e359e7f",
+    "ui/build.gradle.kts": "83c84f6f1d0cd94df6cde744804d7e8abd3c2bfe7fe26184255ab3ade8792838"
+  },
+  "accepted_published_jvm": {
+    "source-engine-jvm-0.1.0.jar": {
+      "bytes": 109366,
+      "sha256": "764233f4a177970d6473559445221b02ff8a93f7d10ab3a42a2a20eceedb6460"
+    },
+    "source-contract-jvm-0.1.0.jar": {
+      "bytes": 139562,
+      "sha256": "817555990e1822c2ff33c45ea66af5af92b406a239d53bc120b211b5be83017d"
+    }
+  },
+  "accepted_published_jvm_evidence": "review/working/backend-5-media-pg-hosted-04/dependencies-testRuntimeClasspath.json",
+  "source_lint_correction": "Mechanically inline applied helper, no lint disable; d2617c00 actual lint qualification pending",
+  "derived_overlay_amendment": {
+    "path": "release/verified-tools.json",
+    "field": "gradle.dependency_graph.files.app/build.gradle.kts",
+    "before": "2f5af388a012de3933fe5b3d10bb8071fbc35acd14b3fb83eb8ca8d5dc767cd8",
+    "after": "aa1606b64784191ef4ab01c4b275b938707132aeb119506e5bd8784f3a88be8c",
+    "reason": "Bind source-reviewed inlined helper; derivative overlay not original frozen nine-file scaffold"
+  }
+}
