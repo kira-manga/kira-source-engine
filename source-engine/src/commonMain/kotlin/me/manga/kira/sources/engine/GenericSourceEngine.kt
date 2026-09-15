@@ -407,8 +407,8 @@ class GenericSourceEngine(
      * and concatenate, deciding "is there more?" from [EndpointSpec.lastPageLocator] (a numeric pagination
      * widget → loop while page < max; or a `true`/`false` has-next flag). Mirrors the legacy multi-page
      * chapter loops (Team X HTML pagination, Tapas JSON `has_next`). With no `pageParam` it is a single
-     * fetch (the original separated-details behavior). A page-1 failure fails the whole call (→ details
-     * fails → fallback); a later-page failure stops with what was gathered.
+     * fetch (the original separated-details behavior). A failure on any required page fails the whole
+     * details call rather than returning the chapters gathered so far as a complete result.
      */
     private suspend fun chaptersPaginated(endpoint: EndpointSpec, baseVars: Map<String, String>): SourceEngineResult<List<SourceChapter>> {
         if (endpoint.pageParam.isEmpty()) {
@@ -426,7 +426,7 @@ class GenericSourceEngine(
                 chaptersFrom(parsed) to paginationState(parsed, endpoint, page)
             }
             when (res) {
-                is SourceEngineResult.Failure -> return if (page == 1) res else SourceEngineResult.Success(all)
+                is SourceEngineResult.Failure -> return res
                 is SourceEngineResult.Success -> {
                     val (chs, state) = res.value
                     if (chs.isEmpty() && page > 1) break

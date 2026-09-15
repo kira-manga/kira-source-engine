@@ -1,12 +1,18 @@
 package me.manga.kira.source.engine
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import me.manga.kira.source.contracts.SourceEngineError
 import me.manga.kira.source.contracts.SourceEngineResult
 import me.manga.kira.source.contracts.SourceMangaRef
 import me.manga.kira.source.contracts.SourceConfigParser
+import me.manga.kira.source.contracts.SourceResponse
+import me.manga.kira.source.contracts.SourceTransport
 import me.manga.kira.source.contracts.model.SourceConfig
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -24,7 +30,27 @@ class GenericSourceClientChapterPaginationTest {
         return doc.sources.first { it.api == api }
     }
 
-    private fun client(api: String) = GenericSourceEngine(source(api), FakeHttpExecutor(PAGINATION_RESPONSES), FakeHeaderStore())
+    private fun client(api: String, http: SourceTransport = FakeHttpExecutor(PAGINATION_RESPONSES)) =
+        GenericSourceEngine(source(api), http, FakeHeaderStore())
+
+    private val jsonManga = SourceMangaRef("pg-json", "en", "x", "https://j.example.com/series/5", "")
+
+    private fun jsonPageUrl(page: Int): String = "${jsonManga.url}/episodes?page=$page"
+
+    private fun requiredPageTransport(
+        page: Int,
+        requested: MutableList<String>,
+        response: () -> SourceResponse,
+    ): SourceTransport {
+        // Keep page 2 nonterminal so a required page-3 failure exercises an accumulated two-page list.
+        val continuingPage = PAGINATION_RESPONSES.getValue(jsonPageUrl(2))
+            .replace("\"has_next\": false", "\"has_next\": true")
+        val http = FakeHttpExecutor(PAGINATION_RESPONSES + (jsonPageUrl(2) to continuingPage))
+        return SourceTransport { request ->
+            requested += request.url
+            if (request.url == jsonPageUrl(page)) response() else http.execute(request)
+        }
+    }
 
     private fun <T> SourceEngineResult<T>.valueOrFail(): T = when (this) {
         is SourceEngineResult.Success -> value
@@ -43,11 +69,75 @@ class GenericSourceClientChapterPaginationTest {
 
     @Test
     fun json_pagination_loops_while_has_next() = runTest {
-        val manga = SourceMangaRef("pg-json", "en", "x", "https://j.example.com/series/5", "")
-        val d = client("pg-json").details(manga).valueOrFail()
+        val http = FakeHttpExecutor(PAGINATION_RESPONSES)
+        val d = client("pg-json", http).details(jsonManga).valueOrFail()
         assertEquals("JsonTitle", d.title)
         // page1 has_next=true → fetch page2 (has_next=false) → 2+1 = 3 episodes
         assertEquals(listOf("E1", "E2", "E3"), d.chapters.map { it.name })
+        assertEquals(listOf(jsonManga.url, jsonPageUrl(1), jsonPageUrl(2)), http.requested)
+    }
+
+    @Test
+    fun required_later_page_failures_preserve_the_typed_error() = runTest {
+        val failures: List<Pair<SourceEngineError, () -> SourceResponse>> = listOf(
+            SourceEngineError.NoConnectivity to { throw IllegalStateException("network is unreachable") },
+            SourceEngineError.Timeout to { throw IllegalStateException("request timed out") },
+            SourceEngineError.Http(503) to { SourceResponse(503, "unavailable") },
+            SourceEngineError.InvalidResponse to { SourceResponse(200, "{") },
+            SourceEngineError.Required("var:chapter.url:id") to {
+                SourceResponse(
+                    200,
+                    """{"data":{"episodes":[{"name":"Missing id"}],"pagination":{"has_next":false}}}""",
+                )
+            },
+        )
+        for (page in 2..3) {
+            for ((error, response) in failures) {
+                val requested = mutableListOf<String>()
+                val http = requiredPageTransport(page, requested, response)
+                assertEquals(
+                    SourceEngineResult.Failure(error),
+                    client("pg-json", http).details(jsonManga),
+                    "required page $page: $error must not become partial success",
+                )
+                assertEquals(listOf(jsonManga.url) + (1..page).map(::jsonPageUrl), requested)
+            }
+        }
+    }
+
+    @Test
+    fun required_later_page_cancellation_rethrows_the_same_instance() = runTest {
+        for (page in 2..3) {
+            val cancellation = CancellationException("cancel required page $page")
+            val requested = mutableListOf<String>()
+            val http = requiredPageTransport(page, requested) { throw cancellation }
+            val thrown = assertFailsWith<CancellationException> {
+                client("pg-json", http).details(jsonManga)
+            }
+            assertSame(cancellation, thrown)
+            assertEquals(listOf(jsonManga.url) + (1..page).map(::jsonPageUrl), requested)
+        }
+    }
+
+    @Test
+    fun empty_terminal_page_succeeds_without_requesting_another_page() = runTest {
+        val requested = mutableListOf<String>()
+        val http = requiredPageTransport(2, requested) {
+            // An empty successful page remains terminal even if the server leaves has_next true.
+            SourceResponse(200, """{"data":{"episodes":[],"pagination":{"has_next":true}}}""")
+        }
+        val details = client("pg-json", http).details(jsonManga).valueOrFail()
+        assertEquals("JsonTitle", details.title)
+        assertEquals(listOf("E1", "E2"), details.chapters.map { it.name })
+        assertEquals(listOf(jsonManga.url, jsonPageUrl(1), jsonPageUrl(2)), requested)
+    }
+
+    @Test
+    fun html_required_last_page_http_failure_is_not_partial_success() = runTest {
+        val manga = SourceMangaRef("pg-html", "en", "x", "https://h.example.com/series/x", "")
+        val http = FakeHttpExecutor(PAGINATION_RESPONSES - "${manga.url}?page=3")
+        assertEquals(SourceEngineResult.Failure(SourceEngineError.Http(404)), client("pg-html", http).details(manga))
+        assertEquals(listOf(manga.url) + (1..3).map { "${manga.url}?page=$it" }, http.requested)
     }
 
     @Test
