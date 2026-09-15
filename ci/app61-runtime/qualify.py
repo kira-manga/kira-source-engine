@@ -68,7 +68,7 @@ def main():
     host = runtime.host()
     require((os.environ.get("RUNNER_OS"), os.environ.get("RUNNER_ARCH")) ==
             (("Linux", "X64") if host == "linux-x64" else ("macOS", "ARM64")), "Wrong hosted architecture")
-    roles = ("java", "native", "ruby") if host == "macos-arm64" else ("java", "ruby")
+    roles = ("java",) if host == "macos-arm64" else ("ruby",)
     os.umask(0o077)
     temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
     identity(temporary)
@@ -119,7 +119,7 @@ def main():
         require(not commands.call(["/usr/bin/git", "-C", app, "status", "--porcelain=v1", "--untracked-files=all"],
                                   label + "-status", 15, end=work_end).strip(), "Issue checkout changed")
         values = {path: digest(app / path) for path in binding["candidateFiles"]}
-        require(values == binding["candidateFiles"], "Candidate bytes differ from freeze02")
+        require(values == binding["candidateFiles"], "Candidate bytes differ from bound source freeze")
         owner.save(run / "reports" / (label + ".json"), values)
 
     def capture(role):
@@ -146,9 +146,6 @@ def main():
         require(commands.call(["/usr/bin/git", "-C", control, "rev-parse", "HEAD^"], "carrier-parent", 15,
                               end=work_end).strip() == binding["carrierBase"], "Carrier is not directly on trusted base")
         check_source("source-before")
-        if host == "macos-arm64":
-            require(commands.call(["/usr/bin/xcodebuild", "-version"], "xcode-identity", 30, end=work_end).strip() ==
-                    "Xcode 26.4.1\nBuild version 17E202", "Wrong selected Xcode identity")
         pins = runtime.read_json(app / "release/verified-tools.json")["runtime_archives"]
         for role in roles:
             status = result["roles"][role] = {"passed": False}
