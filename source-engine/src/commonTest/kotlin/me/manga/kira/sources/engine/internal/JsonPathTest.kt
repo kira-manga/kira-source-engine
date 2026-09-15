@@ -3,7 +3,9 @@ package me.manga.kira.source.engine.internal
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class JsonPathTest {
     private val json = Json
@@ -52,5 +54,52 @@ class JsonPathTest {
         val node = parse("""{"a":1}""")
         assertNull(JsonPath.string(node, "z.y.x"))
         assertEquals(emptyList(), JsonPath.stringList(node, "a[*]")) // a is not an array
+    }
+
+    @Test
+    fun existing_root_and_prefix_aliases_are_preserved() {
+        val primitive = parse("\"root\"")
+        for (path in listOf("", " ", "$", ".", "${'$'}.")) {
+            assertTrue(JsonPath.isSupported(path), path)
+            assertEquals("root", JsonPath.string(primitive, path), path)
+        }
+        val node = parse("""{"a":"value"}""")
+        for (path in listOf("a", ".a", "${'$'}a", "${'$'}.a", "a.", "  ${'$'}.a.  ")) {
+            assertTrue(JsonPath.isSupported(path), path)
+            assertEquals("value", JsonPath.string(node, path), path)
+        }
+    }
+
+    @Test
+    fun root_arrays_nested_wildcards_and_index_aliases_are_preserved() {
+        val node = parse("""[{"data":["one"]},{"data":["two"]}]""")
+        assertTrue(JsonPath.isSupported("[*].data[*]"))
+        assertEquals(listOf("one", "two"), JsonPath.stringList(node, "[*].data[*]"))
+        for (path in listOf("[1].data[0]", "[+1].data[-0]", "[01].data[00]", "[+01].data[+0]")) {
+            assertTrue(JsonPath.isSupported(path), path)
+            assertEquals("two", JsonPath.string(node, path), path)
+        }
+    }
+
+    @Test
+    fun keys_are_literal_not_ascii_identifiers_or_expressions() {
+        val node = parse("""{"書名":{"اسم-المجلد":"yes"},"a,b":"comma","stray]":"bracket","*":"literal"}""")
+        for ((path, value) in mapOf("書名.اسم-المجلد" to "yes", "a,b" to "comma", "stray]" to "bracket", "*" to "literal")) {
+            assertTrue(JsonPath.isSupported(path), path)
+            assertEquals(value, JsonPath.string(node, path), path)
+        }
+    }
+
+    @Test
+    fun unsupported_syntax_is_not_partially_resolved() {
+        val node = parse("""{"items":[{"active":true,"id":"one"},{"id":"two"}]}""")
+        for (path in listOf(
+            "items[?(@.active)]", "items[0:2]", "items[0,1]", "items['id']", "items[-1]",
+            "items[2147483648]", "items[0", "items[0]suffix", "items[0][1]", "items..id",
+            "${'$'}..items", "items[]", "items[*]ignored", "items[0]]", "items[",
+        )) {
+            assertFalse(JsonPath.isSupported(path), path)
+            assertEquals(emptyList(), JsonPath.resolve(node, path), path)
+        }
     }
 }
