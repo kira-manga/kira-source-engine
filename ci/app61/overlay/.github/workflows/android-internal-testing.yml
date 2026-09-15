@@ -1,0 +1,271 @@
+name: Android Internal and Open Testing
+
+on:
+  push:
+    branches:
+      - internal-testing
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: kira-android-internal-testing
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    name: Validate, sign, and upload Android Internal and Open testing
+    if: >-
+      ${{ github.ref == 'refs/heads/internal-testing' &&
+          !contains(github.event.head_commit.message || '', '[skip android]') &&
+          !contains(github.event.head_commit.message || '', '[skip both]') }}
+    environment: google-play-internal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: "true"
+      KIRA_PACKAGES_USER: ${{ github.actor }}
+      FASTLANE_OPT_OUT_USAGE: "1"
+      FASTLANE_SKIP_UPDATE_CHECK: "1"
+      FASTLANE_HIDE_CHANGELOG: "1"
+      FASTLANE_DISABLE_COLORS: "1"
+      KIRA_SOURCE_CONFIG_BASE_URL: ${{ vars.KIRA_SOURCE_CONFIG_BASE_URL }}
+      KIRA_SOURCE_CONFIG_PINNED_KEYS: ${{ vars.KIRA_SOURCE_CONFIG_PINNED_KEYS }}
+
+    steps:
+      - name: Check out internal-testing
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Verify pinned bootstrap inputs
+        run: /usr/bin/ruby scripts/release/verify-toolchain-inputs.rb
+
+      - name: Set up Java 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "21.0.12.1+1"
+          check-latest: false
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+
+      - name: Set up Ruby and pinned Fastlane
+        uses: ruby/setup-ruby@bec3f19a76460dbe12f60def7d1a77585f07516c # v1
+        with:
+          ruby-version: "3.3.12"
+          bundler: "4.0.16"
+          bundler-cache: true
+
+      - name: Consume the verified Android graph before protected inputs
+        env:
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ ! -e app/google-services.json && ! -L app/google-services.json ]] || {
+            echo 'Unsigned preflight requires an absent Firebase slot' >&2
+            exit 1
+          }
+          cleanup_placeholder() {
+            local original_status=$?
+            if [[ ! -f app/google-services.json || -L app/google-services.json ]] ||
+                ! cmp -s app/google-services.json.example app/google-services.json; then
+              echo 'Unsigned preflight Firebase slot changed; refusing cleanup' >&2
+              exit 1
+            fi
+            rm -- app/google-services.json || exit 1
+            exit "$original_status"
+          }
+          ( set -o noclobber; cat app/google-services.json.example > app/google-services.json )
+          trap cleanup_placeholder EXIT
+          ./gradlew :core:desktopTest :domain:desktopTest :data:desktopTest :data:local:desktopTest :data:download:desktopTest :platform:desktopTest :presentation:desktopTest :composeApp:desktopTest :ui:desktopTest :sources:engine:desktopTest :sources:config:desktopTest :sources:legacy:desktopTest :app:testDebugUnitTest :app:lintRelease :app:bundleRelease --dependency-verification=strict --no-configuration-cache --no-build-cache --no-daemon -PkiraUseMavenLocal=false -Porg.gradle.java.installations.auto-download=false -Pandroid.builder.sdkDownload=false -PallowPlaceholderGoogleServices=true --stacktrace
+
+      - name: Validate protected inputs and select the next unused Play version code
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set +x
+          required=(
+            ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS
+            ANDROID_KEY_PASSWORD GOOGLE_SERVICES_JSON GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+            KIRA_SOURCE_CONFIG_BASE_URL KIRA_SOURCE_CONFIG_PINNED_KEYS
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing protected release input: $name"
+              exit 1
+            fi
+          done
+
+          ruby -rjson -e 'JSON.parse(ENV.fetch("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")); puts "Play service-account JSON is valid"'
+
+          version_name="$(awk -F= '$1 == "VERSION_NAME" { print $2 }' release/version.properties | tr -d '\r')"
+          [[ "$version_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error::VERSION_NAME in release/version.properties is invalid"
+            exit 1
+          }
+
+          build_number_file="$RUNNER_TEMP/kira-android-version-code"
+          KIRA_BUILD_NUMBER_FILE="$build_number_file" \
+            ruby scripts/release/google-play-open-testing.rb select-version-code
+          build_number="$(tr -d '\r\n' < "$build_number_file")"
+          [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Google Play returned an invalid Android version code"
+            exit 1
+          }
+
+          {
+            printf 'KIRA_VERSION_NAME=%s\n' "$version_name"
+            printf 'KIRA_BUILD_NUMBER=%s\n' "$build_number"
+          } >> "$GITHUB_ENV"
+          echo "Using version $version_name ($build_number)"
+
+      - name: Test Google Play release safety helpers
+        run: ruby scripts/release/tests/google-play-open-testing-test.rb
+
+      - name: Verify the HTTPS source-config authority is live and signed
+        env:
+          KIRA_SOURCE_CONFIG_BASE_URL: ${{ vars.KIRA_SOURCE_CONFIG_BASE_URL }}
+          KIRA_SOURCE_CONFIG_PINNED_KEYS: ${{ vars.KIRA_SOURCE_CONFIG_PINNED_KEYS }}
+        run: |
+          set +x
+          base_url="${KIRA_SOURCE_CONFIG_BASE_URL%/}"
+          headers="$RUNNER_TEMP/kira-source-document.headers"
+          body="$RUNNER_TEMP/kira-source-document.json"
+          curl --fail-with-body --silent --show-error --location --max-time 30 \
+            --proto '=https' --tlsv1.2 \
+            -D "$headers" -o "$body" \
+            "$base_url/api/v1/source-config/document"
+
+          for header in \
+            x-config-signature-format x-config-signature-algorithm \
+            x-config-signing-key-id x-config-signature \
+            x-config-revision x-config-checksum x-config-created-at; do
+            if ! grep -Eiq "^${header}:[[:space:]]*[^[:space:]].*$" "$headers"; then
+              echo "::error::Source-config response is missing signed header: $header"
+              exit 1
+            fi
+          done
+
+          key_id="$(awk -F': *' 'tolower($1) == "x-config-signing-key-id" { print $2 }' "$headers" | tr -d '\r')"
+          if ! printf '%s\n' "$KIRA_SOURCE_CONFIG_PINNED_KEYS" | tr ',' '\n' |
+            awk -F= -v expected="$key_id" '$1 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
+            echo "::error::Live source-config signing key id is not present in KIRA_SOURCE_CONFIG_PINNED_KEYS"
+            exit 1
+          fi
+          echo "Verified HTTPS source-config endpoint and pinned signing key id: $key_id"
+
+      - name: Verify Google Play Internal and Open testing are publishable
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          KIRA_ANDROID_PACKAGE_NAME: me.manga.kira
+        run: |
+          set +x
+          ruby scripts/release/google-play-open-testing.rb preflight
+
+      - name: Decode real Firebase configuration
+        id: android-firebase
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          set +x
+          umask 077
+          ruby -rbase64 -e '
+            encoded = ENV.fetch("GOOGLE_SERVICES_JSON").gsub(/\s+/, "")
+            decoded = Base64.strict_decode64(encoded)
+            abort("GOOGLE_SERVICES_JSON decoded to an empty file") if decoded.empty?
+            path = File.join(ENV.fetch("GITHUB_WORKSPACE"), "app/google-services.json")
+            File.binwrite(path, decoded)
+            File.chmod(0o600, path)
+          '
+
+      - name: Reconstruct the Android upload keystore in the runner temp directory
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set +x
+          umask 077
+          export KIRA_ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/kira-upload.jks"
+          ruby -rbase64 -e '
+            encoded = ENV.fetch("ANDROID_KEYSTORE_BASE64").gsub(/\s+/, "")
+            decoded = Base64.strict_decode64(encoded)
+            abort("ANDROID_KEYSTORE_BASE64 decoded to an empty file") if decoded.empty?
+            path = ENV.fetch("KIRA_ANDROID_KEYSTORE_PATH")
+            File.binwrite(path, decoded)
+            File.chmod(0o600, path)
+          '
+          printf 'KIRA_ANDROID_KEYSTORE_PATH=%s\n' "$KIRA_ANDROID_KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build and verify the signed AAB offline
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/kira-upload.jks
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:verifyReleaseBundleIdentity --dependency-verification=strict --no-configuration-cache --no-build-cache --no-daemon -PkiraUseMavenLocal=false -Porg.gradle.java.installations.auto-download=false -Pandroid.builder.sdkDownload=false --offline --stacktrace
+
+          signature_report="$RUNNER_TEMP/kira-aab-signature.txt"
+          jarsigner -verify -certs \
+            app/build/outputs/bundle/release/app-release.aab \
+            > "$signature_report" 2>&1
+          if ! grep -q '^jar verified\.' "$signature_report"; then
+            echo '::error::The signed AAB did not pass jarsigner verification'
+            exit 1
+          fi
+          echo 'Signed AAB signature verification passed'
+
+          build_config="$(find app/build/generated -type f -path '*/release/*/BuildConfig.*' -print -quit)"
+          if [[ -z "$build_config" ]] ||
+            ! grep -Eq 'CRASH_DIAGNOSTICS_ENABLED[[:space:]]*=[[:space:]]*false' "$build_config"; then
+            echo '::error::Release BuildConfig does not prove crash diagnostics are disabled'
+            exit 1
+          fi
+          echo 'Release crash diagnostics are disabled'
+
+      - name: Upload the signed AAB to Google Play Internal testing
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          KIRA_ANDROID_AAB_PATH: ${{ github.workspace }}/app/build/outputs/bundle/release/app-release.aab
+          KIRA_ANDROID_MAPPING_PATH: ${{ github.workspace }}/app/build/outputs/mapping/release/mapping.txt
+        run: |
+          set +x
+          ruby scripts/release/google-play-open-testing.rb verify-version-code-unused
+          bundle exec fastlane android upload_internal
+
+      - name: Publish the Internal version to Google Play Open testing
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          KIRA_ANDROID_PACKAGE_NAME: me.manga.kira
+        run: |
+          set +x
+          ruby scripts/release/google-play-open-testing.rb publish
+
+      - name: Preserve signed AAB and R8 mapping as workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-android-testing-${{ env.KIRA_BUILD_NUMBER }}
+          path: |
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/mapping/release/mapping.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Remove temporary release credentials and Firebase configuration
+        if: ${{ always() && (steps.android-firebase.outcome == 'success' || steps.android-firebase.outcome == 'failure') }}
+        run: |
+          set +x
+          rm -f "$RUNNER_TEMP/kira-upload.jks"
+          rm -f "$RUNNER_TEMP/kira-android-version-code"
+          rm -f "$GITHUB_WORKSPACE/app/google-services.json"

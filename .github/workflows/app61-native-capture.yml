@@ -1,0 +1,51 @@
+name: App61 NONSHIPPING native input capture
+
+on:
+  push:
+    branches: [validation/app61-native-capture-20260915-02]
+    paths: [.github/workflows/app61-native-capture.yml, 'ci/app61/**']
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: kira-app61-native-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Check out this reviewed carrier only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select the scaffold's exact launcher runtime
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21.0.12+101.0.LTS'
+          check-latest: false
+      - name: One unsigned Release bundle and lint graph; no publication or tests
+        id: capture
+        timeout-minutes: 50
+        env:
+          # The launcher forwards these ONLY to the one native Gradle capture.
+          # No ambient GITHUB_TOKEN or owner-token fallback reaches child processes.
+          KIRA_PACKAGES_USER: ${{ github.actor }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ github.token }}
+        run: python3 control/ci/app61/capture.py --capture-nonshipping
+      - name: Raw native evidence only, including partial failures
+        if: ${{ always() && steps.capture.outputs.cleanup_barrier_absent == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app61-native-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 3
