@@ -235,3 +235,32 @@ PYTHONPATH=.github/scripts python3 -B -m unittest \
 Their result cannot qualify GitHub protection or publication. The earlier 26 synthetic
 policy cases and accepted Stage A/archive evidence retain their separate scopes; this
 increment does not require replaying them or running Gradle/native builds.
+
+### Read-only official producer receipt acquisition
+
+`.github/scripts/github_publication_receipts.py` provides
+`acquire_official_receipts(expected, token=None)`. It validates the independently
+selected complete release tuple before any network access, then fetches only the
+exact attempt, its jobs, its artifact, and finally the current run from the literal
+GitHub API host. It uses system TLS validation, ignores proxy/token environment
+discovery, refuses redirects/pagination/compression and bounds each JSON response
+to 8MiB. Every GET requests cache revalidation and rejects positive/malformed `Age`;
+absent/zero age is not an independent guarantee of origin consistency. The optional
+read token is explicit and never included in returned data or
+error messages. HTTP streams/connections close on success and failure. Socket
+timeouts are 15 seconds; an elapsed 30-second budget is checked around streaming
+reads. System DNS resolution does not have a separately enforced hard deadline.
+
+Returned official metadata is an **observation, not approval or a reservation**.
+Current-attempt readback happens last to reject already superseded producer runs;
+a run or artifact can change afterward. Reacquire at each later decision boundary.
+No artifact bytes, attestation, package availability, branch protection, approval,
+or all-writer exclusion is proved by these metadata receipts. Completed byte intake
+and its pinned native verifier remain separate. Stage C's unconditional hold and
+the disabled publisher are unchanged. No remote publication is enabled.
+
+Focused synthetic HTTP-boundary tests (no real API, credentials or provenance):
+
+```bash
+PYTHONPATH=.github/scripts python3 -B -m unittest test_github_publication_receipts -v
+```
