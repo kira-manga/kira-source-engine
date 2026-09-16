@@ -19,3 +19,5 @@ allprojects {
         }
     }
 }
+
+apply(from = "gradle/publication-gates.gradle.kts")
