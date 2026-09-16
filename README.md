@@ -48,15 +48,126 @@ committed `VERSION_NAME=0.1.0-SNAPSHOT` default are unchanged.
   the former GitHub-destination publication tasks are not configured by this source.
 - Each module's aggregate `publish` task explicitly refuses, including with a numeric
   `-PVERSION_NAME` override. `publishToMavenLocal` is not refused. Re-enabling a destination
-  or publisher requires a separately reviewed source change, not a property/secret toggle.
+  or remote publisher requires a separately reviewed source change, not a property/secret
+  toggle. The explicit modes below add only one fixed owned-file destination. Forbidden
+  publication graphs are rejected before task execution, not merely by `publish.doFirst`.
 
 This removes the present tag-to-package-write route; it is **not** an effective package-write
 boundary against repository writers, historical/alternate workflows, init scripts or other
 out-of-band credentials. Do not use old commits or ad-hoc routes to bypass containment.
-No package access, protected environment, signed provenance, outgoing-byte gate or registry
-immutability has been established by this source change. Configuration-only Gradle verification
-and independent review are still required to accept this limited slice; no native/package
-publication result follows from static inspection.
+No package access, protected environment, signed provenance, proven outgoing-byte gate or
+registry immutability follows from this source. The Stage A addition below still requires
+independent actual-diff review and separately admitted product validation; static inspection
+is not a native/package publication result.
+
+## Stage A: unqualified owned-file byte export and promotion
+
+**Source implementation only: no real KMP export/promotion pass is claimed. These command
+shapes do not authorize execution.** No workflow, toolchain, target, module build, runtime
+contract or consumer changes accompany this gate. Ordinary builds without
+`kiraPublicationMode` add no publishing repository and retain Maven-local behavior.
+
+After separate admission, `gradle/publication-gates.gradle.kts` has two local modes. Both
+require Gradle9.6.1, the actually applied KGP2.2.21 plugin in every module, Java21, offline
+operation, no configuration cache and a numeric local `VERSION_NAME` override; the committed
+SNAPSHOT default is deliberately ineligible. Missing SDK37/cached prerequisites are a stop,
+not permission to download them. A complete macOS
+producer and a fresh compatible promotion workspace are the initial qualification target.
+
+The pinned read-only model adapter reads `PublicationInternal.component`,
+`SoftwareComponentInternal.usages` and `MavenPomInternal.dependencies`; it never runs an
+internal publisher, descriptor generator or XML action. Expected variant membership,
+typed attributes, per-variant project edges and child destinations come from the actual
+components, not agreement between supplied descriptors. Unsupported interfaces, attribute
+types, project selectors, capabilities, global excludes or cohort constraints stop the gate.
+
+Native POM tuples supply cohort dependency scopes/optional/type/classifier/exclusions and
+separate dependency-management expectations **before KGP's XML coordinate rewrite**. Final
+project GAVs use only the admitted homogeneous-cohort rule: match corresponding actual KGP
+targets by name/platform/typed attributes and identical usage shapes, then use their real
+publication coordinates. This is not a general variant resolver or a post-XML POM model.
+Rewrite-property customization, ambiguous targets, inherited/profile dependencies and
+unsupported filtering fail rather than trigger generation or a supplied-metadata fallback.
+`kotlin.mpp.keepMppDependenciesIntactInPoms` must be absent from extras, Gradle properties
+and root `local.properties`; even explicit false or a present-null extra is refused. The
+local file uses UTF-8 Java Properties syntax. Its private contents, values, paths and digests
+are neither logged nor sealed; only the successfully checked default policy enters `model.tsv`.
+Android/native mapping, provider resolution and fresh no-generation promotion remain unproven.
+These checks cover cohort project semantics, not all third-party dependency metadata.
+
+1. **Export/build separately.** `:exportKiraPublicationBytes` depends on the actual artifact,
+   POM and Gradle-module producers for all three modules and their five existing publications
+   (`kotlinMultiplatform`, `android`, `jvm`, `iosArm64`, `iosSimulatorArm64`). It copies their
+   raw outputs without repackaging or rewriting them to `build/publication-bytes/bundle/`.
+   The bundle must not already exist. No native repository writer may run in this mode.
+
+   ```bash
+   # LOCAL_TEST_VERSION is a separately chosen numeric owned-local test value, not a release.
+   ./gradlew --offline --no-configuration-cache \
+     -PkiraPublicationMode=export "-PVERSION_NAME=$LOCAL_TEST_VERSION" \
+     :exportKiraPublicationBytes
+   ```
+
+   `payloads/` contains only raw binaries, sources, POMs and `.module` files. `inventory.tsv`
+   records publication/GAV, role, Maven-relative path, length and SHA256 in nine columns,
+   including deterministic checksum-sidecar expectations. `model.tsv` binds native output
+   paths/producers, native component/variant/project-edge/POM expectations, selected build/tool
+   files, module `src` bytes and Gradle/KGP/Java/OS identity;
+   `producers.txt` lists exact fully qualified producer tasks. `seal.sha256` hashes those
+   three metadata files. Independently retain the SHA256 of **`seal.sha256` itself**, printed
+   by export. None of these hashes proves source provenance, CI identity or human approval.
+
+   For a separately admitted configuration-only observation, add `--dry-run --info` to that
+   export command. The eager read-only census logs `Kira publication model:` rows for all
+   model seams. It runs no producer or byte-validation actions and earns no export/promotion
+   or negative-case credit. The model is read again at export, intake and each writer guard.
+
+2. **Restore/promote without regeneration.** In a fresh owned workspace with matching
+   source/build/model/tool identity, copy the verified bundle to
+   `build/publication-bytes/input/`, without build caches or task histories. Every native
+   output location must be absent, and `build/publication-bytes/owned-maven/` absent or
+   empty. There is no destination override, credential source or remote mode.
+
+   Form literal `-x <task>` arguments from the sealed producer list; never `eval` its text.
+   The gate recomputes and requires the exact exclusion set and final no-producer graph.
+   Keep all producers, especially POM/GMM generators, **enabled but excluded**. For example
+   in Bash, after verified intake and separate retention of `SEALED_DIGEST`:
+
+   ```bash
+   producer_args=()
+   while IFS= read -r task; do
+     [[ $task =~ ^(:[A-Za-z0-9_.-]+)+$ ]] || exit 1
+     producer_args+=(-x "$task")
+   done < build/publication-bytes/input/producers.txt
+   ./gradlew --offline --no-configuration-cache \
+     -PkiraPublicationMode=promote "-PVERSION_NAME=$LOCAL_TEST_VERSION" \
+     "-PkiraPublicationSealSha256=$SEALED_DIGEST" \
+     "${producer_args[@]}" :promoteKiraPublicationBytes
+   ```
+
+   Restore and fresh verification are mandatory dependencies, not standalone entrypoints.
+   Every serialized native writer rechecks the entire 15-publication cohort, current
+   graph/exclusions and action recipe immediately before its original native action. No
+   compilation, packaging, POM or GMM generation is allowed in promotion. Ordinary `publish`
+   aggregates, Maven-local, extra tasks and mixed export/promotion graphs are refused.
+   A direct task such as `:source-engine:publishJvmPublicationToEngine6OwnedRepository` uses
+   the same whole-cohort guard, but its required readback covers only selected publications;
+   that is not a complete-cohort promotion result.
+
+Gradle still computes checksum sidecars and artifact-level `maven-metadata.xml` indexes;
+this is not zero computation. `:verifyKiraPublicationReadback` runs after native writers and
+requires actual task success, the exact immutable path/byte set and strictly bounded index
+semantics. Native exit0 alone is insufficient. Failed/partial bundles or destinations are
+not overwritten, resealed or automatically retried; preserve the failure and use a separately
+admitted fresh workspace. Do not relax a model/metadata gate, drop a target or relabel a
+rebuild if the pinned KMP no-regeneration mechanism fails.
+
+This is not isolation from arbitrary Gradle/init code or concurrent hostile filesystem
+mutation. Excluded-but-enabled native descriptor publication and the actual Android/Apple
+model still need product qualification. File hashes and owned-file readback establish neither
+trusted production/approval nor remote immutability, external-writer exclusion or consumer
+acceptance. The credential-absence check uses the separately reviewed, pinned Gradle9.6.1
+internal presence API (never credential values); no internal/custom publisher is used.
 
 ## Gates still required before any remote activation
 
@@ -72,6 +183,7 @@ publication result follows from static inspection.
 Gradle9.6.1's native publisher retries individual PUTs and can merely warn on SHA256/SHA512
 sidecar upload failures. A future activation decision must represent those semantics honestly:
 there is no blanket no-transport-retry guarantee, and Gradle exit0 is not complete remote
-readback. The native byte gate and the larger authorization/publication framework are deferred,
-not silently accepted. Engine5's provisional cohort and raw failures remain unactivated and
-retain their previously accepted scopes.
+readback. The owned-file source gate remains unqualified; remote wiring and the larger
+authorization/publication framework remain deferred, not silently accepted. Engine6 remains
+PARTIAL/open. Engine5's provisional cohort and raw failures remain unactivated and retain
+their previously accepted scopes.
