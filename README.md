@@ -187,3 +187,51 @@ readback. The owned-file source gate remains unqualified; remote wiring and the 
 authorization/publication framework remain deferred, not silently accepted. Engine6 remains
 PARTIAL/open. Engine5's provisional cohort and raw failures remain unactivated and retain
 their previously accepted scopes.
+
+## Read-only release lineage observation
+
+The product policy helper and its existing Stage B tests are retained without adopting
+the separate candidate CI recipe. Both workflows and all remote-publication containment
+remain unchanged. The `lineage` command adds only local Git tag/version/ancestry checks:
+
+```bash
+python3 -B .github/scripts/publication_policy.py --root "$RELEASE_REPOSITORY" lineage \
+  --version "$SELECTED_VERSION" --tag "$SELECTED_TAG" \
+  --source-sha "$SELECTED_SOURCE_SHA" --source-tree "$SELECTED_SOURCE_TREE" \
+  --tag-object "$SELECTED_TAG_OBJECT" --branch-tip "$SELECTED_CAMPAIGN_TIP"
+```
+
+Supply independently selected full SHA-1 object IDs, not identities inferred from the
+artifact being assessed. `--tag-object` is the annotated tag object or, for a lightweight
+tag, its commit object. The only branch inspected is
+`refs/heads/remediation/production-readiness-2026-09-04`. This campaign check does **not**
+choose the eventual protected publisher branch or prove that the local ref is protected
+or authentic. It never fetches, changes refs or registers a package destination.
+
+The tag must peel to the selected source commit/tree, whose committed regular
+`gradle.properties` must contain the matching canonical `X.Y.Z`. Working-tree files and
+version environment variables cannot replace that blob; checkout cleanliness is not
+claimed by this command. `0.1.0-SNAPSHOT` remains release-ineligible. Actual ancestry,
+not equal trees, must connect the source to the exact selected campaign tip. Shallow,
+missing-parent, grafted, replacement, alternate-object and partial/promisor history is
+refused. Git environment overrides are discarded, network protocols are disabled, and
+commit-graph caches are not used. Reads have individual 30-second timeouts; the complete
+walk is limited to 4096 commits and version metadata to 8MiB.
+
+Success returns a **local observation, not a reservation**. Tag/branch objects and history
+guards are checked again before returning, but refs can move afterward. There is no
+tag-signature, remote-origin, protection, approval or provenance claim. The unconditional
+Stage C authority/live-recheck hold remains, as do separate committed-checkout/receipt
+intake, live approval/freshness, publisher/readback and consumer requirements. No publisher
+is activated and no release version is selected by this increment.
+
+The new focused tests use disposable real Git repositories, not mocked ancestry:
+
+```bash
+PYTHONPATH=.github/scripts python3 -B -m unittest \
+  test_publication_policy.ReleaseLineageGitTests -v
+```
+
+Their result cannot qualify GitHub protection or publication. The earlier 26 synthetic
+policy cases and accepted Stage A/archive evidence retain their separate scopes; this
+increment does not require replaying them or running Gradle/native builds.
