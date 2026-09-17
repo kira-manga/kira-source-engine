@@ -554,6 +554,14 @@ def expected_identity(expected):
             "Missing selected run/attempt/workflow/job/artifact IDs")
 
 
+def copy_expected_identity(expected):
+    """Own the selected scalar identity fields before checking external inputs."""
+    require(type(expected) is dict and len(expected) <= 64, "Expected tuple required")
+    expected = dict(expected)
+    expected_identity(expected)
+    return expected
+
+
 def timestamp(value):
     require(isinstance(value, str) and value.endswith("Z"), "UTC receipt timestamp required")
     return datetime.fromisoformat(value[:-1] + "+00:00")
@@ -669,7 +677,8 @@ def native_verify(gh_asset, bundle, subjects, expected):
             _verified_policy(json_data(result.stdout), expected)
 
 
-def completed_intake(root, expected, receipts, archive, gh_asset, attestation):
+def verify_completed_bytes(root, expected, archive, gh_asset, attestation):
+    """Shared byte/native phase; not a completed receipt or release-authorizing result."""
     expected_identity(expected)
     source = source_snapshot(root, expected["source_sha"], fresh=True)
     require(all(source[k] == expected[k] for k in ("source_tree", "workflow_sha256")), "Receipt source tree/workflow mismatch")
@@ -681,11 +690,22 @@ def completed_intake(root, expected, receipts, archive, gh_asset, attestation):
         inventory = Path(temp) / "inventory.tsv"
         write_new(inventory, metadata["inventory.tsv"])
         native_verify(gh_asset, attestation, (archive, inventory), expected)
-    # The producer cannot call this on itself: these must be final, successful official receipts.
-    compare_official_receipts(expected, receipts["attempt"], receipts["current"], receipts["jobs"],
-                              receipts["artifact"], datetime.now(timezone.utc))
+    return source, measured
+
+
+def recheck_completed_bytes(root, expected, archive, source, measured):
+    """Run after receipt acquisition/comparison too, detecting mutation during that phase."""
     require(source_snapshot(root, expected["source_sha"], fresh=True) == source, "Source changed during intake")
     require(archive_intake(archive, expected["version"], source["files"])[0] == measured, "Archive changed during intake")
+
+
+def completed_intake(root, expected, receipts, archive, gh_asset, attestation):
+    """Offline supplied-receipt comparison; saved JSON cannot establish live freshness."""
+    expected = copy_expected_identity(expected)
+    source, measured = verify_completed_bytes(root, expected, archive, gh_asset, attestation)
+    compare_official_receipts(expected, receipts["attempt"], receipts["current"], receipts["jobs"],
+                              receipts["artifact"], datetime.now(timezone.utc))
+    recheck_completed_bytes(root, expected, archive, source, measured)
 
 
 APPROVAL_FIELDS = {"repository", "source_sha", "source_tree", "version", "tag", "producer_workflow_ref",
@@ -745,7 +765,7 @@ def main():
     child = sub.add_parser("intake")
     child.add_argument("--archive", type=Path, required=True)
     child.add_argument("--inventory", type=Path, required=True)
-    child = sub.add_parser("receipt")
+    child = sub.add_parser("receipt", help="Offline saved-receipt comparison; no live freshness")
     for name in ("expected", "receipts", "archive", "gh-asset", "attestation"):
         child.add_argument("--" + name, type=Path, required=True)
     child = sub.add_parser("lineage", help="Read-only local tag/commit/ancestry observation, never publication authority")
@@ -793,7 +813,7 @@ def main():
     else:
         completed_intake(args.root, json_data(read_small(args.expected)), json_data(read_small(args.receipts)),
                          args.archive, args.gh_asset, args.attestation)
-        print("Completed candidate receipt comparisons matched. NOT release approval or publication authority.")
+        print("Offline saved-receipt comparison matched. No live freshness or release authority.")
 
 
 if __name__ == "__main__":

@@ -62,6 +62,16 @@ def _get_json(path, token):
             connection.close()
 
 
+def validated_request(expected, token=None):
+    """Validate and copy the selection before byte/native work or any HTTP request."""
+    expected = policy.copy_expected_identity(expected)
+    for key in ("run_id", "run_attempt", "workflow_id", "artifact_id", "producer_job_id", "attestation_job_id"):
+        policy.require(expected[key] <= 2**63 - 1, "Selected identity bound exceeded")
+    policy.require(token is None or (type(token) is str and 1 <= len(token) <= 1024
+                   and re.fullmatch(r"[A-Za-z0-9_.-]+", token) is not None), "Read token syntax refused")
+    return expected
+
+
 def acquire_official_receipts(expected, token=None):
     """Acquire exact attempt/jobs/artifact/current metadata; current is observed LAST.
 
@@ -72,13 +82,7 @@ def acquire_official_receipts(expected, token=None):
     decision boundary: this observation cannot reserve a run/artifact against future races.
     """
     try:
-        policy.require(type(expected) is dict and len(expected) <= 64, "Expected tuple required")
-        expected = dict(expected)
-        policy.expected_identity(expected)
-        for key in ("run_id", "run_attempt", "workflow_id", "artifact_id", "producer_job_id", "attestation_job_id"):
-            policy.require(expected[key] <= 2**63 - 1, "Selected identity bound exceeded")
-        policy.require(token is None or (type(token) is str and 1 <= len(token) <= 1024
-                       and re.fullmatch(r"[A-Za-z0-9_.-]+", token) is not None), "Read token syntax refused")
+        expected = validated_request(expected, token)
         prefix = "/repos/" + policy.REPOSITORY + "/actions"
         run = prefix + "/runs/" + str(expected["run_id"])
         attempt = run + "/attempts/" + str(expected["run_attempt"])

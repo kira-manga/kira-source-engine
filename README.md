@@ -255,12 +255,57 @@ Returned official metadata is an **observation, not approval or a reservation**.
 Current-attempt readback happens last to reject already superseded producer runs;
 a run or artifact can change afterward. Reacquire at each later decision boundary.
 No artifact bytes, attestation, package availability, branch protection, approval,
-or all-writer exclusion is proved by these metadata receipts. Completed byte intake
-and its pinned native verifier remain separate. Stage C's unconditional hold and
-the disabled publisher are unchanged. No remote publication is enabled.
+or all-writer exclusion is proved by these metadata receipts alone. The connected
+intake below additionally runs the existing byte/native checks. Stage C's unconditional
+hold and the disabled publisher are unchanged. No remote publication is enabled.
 
 Focused synthetic HTTP-boundary tests (no real API, credentials or provenance):
 
 ```bash
 PYTHONPATH=.github/scripts python3 -B -m unittest test_github_publication_receipts -v
+```
+
+### Connected completed-candidate intake (read-only)
+
+`connected_publication_intake.connected_intake(root, expected, archive, gh_asset,
+attestation, *, token=None)` connects the existing byte/native and official-GET adapters.
+It validates and copies the independently selected tuple before work, including the
+explicit optional read token's bounds. It then checks the committed source/version,
+archive/seal and pinned native attestation verification. Only after that expensive phase
+does it acquire the exact official attempt/jobs/artifact/current observations, with the
+current run last. Final source/archive rereads still run **after** the network phase to
+refuse local mutations during acquisition; the native verifier is not run again.
+
+The CLI is deliberately anonymous, with no token argument or token environment/config
+discovery. It accepts neither saved receipts nor a caller's decoded verification result:
+
+```bash
+python3 -B .github/scripts/connected_publication_intake.py \
+  --root "$RELEASE_REPOSITORY" --expected "$INDEPENDENT_SELECTION_JSON" \
+  --archive "$SELECTED_ARCHIVE" --gh-asset "$PINNED_NATIVE_VERIFIER_ARCHIVE" \
+  --attestation "$SELECTED_SIGNED_ATTESTATION_BUNDLE"
+```
+
+These command shapes do not authorize API access or intake execution. A separately
+authorized private-reader caller may supply an explicit programmatic token; it is sent
+only through the fixed-host GET adapter, never to the native verifier, stdout or errors.
+The pinned verifier's own public trust-root refresh may require network, as before.
+The existing `publication_policy.py receipt --receipts ...` command remains an explicitly
+**offline saved-receipt comparison**, not live official acquisition. Both entry points
+reuse the same byte/native and final-reread implementation.
+
+Success returns no cached receipt or release permission. The sequential API reads and
+filesystem rereads are **not an atomic snapshot or freshness lease**; metadata can change
+during final local rereads or after return. A later writer must reacquire at its own
+decision boundary. Protected approval, genuine hosted provenance interoperability,
+unused-GAV authority, all-writer exclusion and remote readback/consumers remain open;
+the unconditional Stage C hold and publisher containment are unchanged.
+
+Focused connected-boundary tests use existing synthetic source/archive fixtures and a
+synthetic HTTP boundary; Git/native verification are mocked, not real provenance or API
+evidence. They do not replay the existing policy, lineage or GET suites:
+
+```bash
+PYTHONPATH=.github/scripts python3 -B -m unittest \
+  test_connected_publication_intake.ConnectedIntakeTests -v
 ```
