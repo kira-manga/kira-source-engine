@@ -2,10 +2,11 @@ name: Shared source engine CI
 
 on:
   pull_request:
+    branches:
+      - remediation/production-readiness-2026-09-04
   push:
     branches:
-      - main
-      - "feature/**"
+      - remediation/production-readiness-2026-09-04
 
 permissions:
   contents: read
@@ -16,18 +17,395 @@ concurrency:
 
 jobs:
   verify:
+    name: verify
     runs-on: macos-15
     timeout-minutes: 30
+    outputs:
+      candidate: ${{ steps.eligibility.outputs.candidate }}
+      version: ${{ steps.eligibility.outputs.version }}
+      source_tree: ${{ steps.eligibility.outputs.source_tree }}
+      workflow_sha256: ${{ steps.eligibility.outputs.workflow_sha256 }}
+      archive_sha256: ${{ steps.pack.outputs.archive_sha256 }}
+      inventory_sha256: ${{ steps.pack.outputs.inventory_sha256 }}
+      seal_sha256: ${{ steps.pack.outputs.seal_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      transport_sha256: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare fresh owned runtime (no cache or output restore)
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$root"
+          # Record ownership immediately, including a later preparation failure.
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          {
+            printf 'KIRA_CI_ROOT=%s\n' "$root"
+            printf 'GRADLE_USER_HOME=%s\n' "$root/gradle"
+            printf 'KONAN_DATA_DIR=%s\n' "$root/konan"
+          } >> "$GITHUB_ENV"
+          mkdir "$root/gradle" "$root/konan" "$root/tmp" "$root/diagnostics"
 
       - name: Set up Java
+        id: java
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
-          java-version: "17"
-          cache: gradle
+          java-version: "21"
 
-      - name: Verify all targets and publications
-        run: ./gradlew --no-daemon check publishToMavenLocal
+      - name: Bind committed inputs and decide candidate eligibility
+        id: eligibility
+        run: python3 -B .github/scripts/publication_policy.py ci-start --state "$KIRA_CI_ROOT/before.json"
+
+      - name: Test bounded policy comparisons (not provenance)
+        env:
+          TMPDIR: ${{ env.KIRA_CI_ROOT }}/tmp
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_publication_policy.py' -v
+
+      - name: Require existing SDK37 metadata and android.jar (37 or 37.0 layout)
+        run: python3 -B .github/scripts/publication_policy.py sdk37
+
+      # One producer workspace/invocation. No Maven-local, mode or version override here.
+      - name: Check all targets and, only if eligible, produce all native descriptors
+        id: build
+        shell: bash
+        env:
+          ELIGIBLE: ${{ steps.eligibility.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          roots=(check)
+          if [[ "$ELIGIBLE" == true ]]; then
+            for module in source-contract source-engine source-testkit; do
+              for generator in generatePomFileFor generateMetadataFileFor; do
+                for publication in KotlinMultiplatform Android Jvm IosArm64 IosSimulatorArm64; do
+                  roots+=(":${module}:${generator}${publication}Publication")
+                done
+              done
+            done
+          fi
+          ./gradlew --no-daemon --no-parallel --max-workers=1 --console=plain \
+            --no-build-cache --no-configuration-cache \
+            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
+            -Pkotlin.compiler.execution.strategy=in-process "${roots[@]}" \
+            2>&1 | tee "$KIRA_CI_ROOT/diagnostics/production.log"
+
+      - name: Stop only this job's owned Gradle workers after production
+        if: ${{ always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Match the pinned wrapper distribution, never bootstrap it just to stop.
+          [[ ! -L "$GRADLE_USER_HOME" ]] || { echo '::error::Refusing redirected Gradle home'; exit 1; }
+          for gradle in "$GRADLE_USER_HOME"/wrapper/dists/gradle-9.6.1-bin/*/gradle-9.6.1/bin/gradle; do
+            [[ -f "$gradle" && -x "$gradle" && ! -L "$gradle" ]] || continue
+            "$gradle" --offline --no-daemon --stop 2>&1 | tee "$KIRA_CI_ROOT/diagnostics/stop-production.log"
+            exit 0
+          done
+          [[ ! -d "$GRADLE_USER_HOME/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; exit 1; }
+          echo 'No installed owned Gradle runtime; no stop/bootstrap needed.'
+
+      - name: Compare committed inputs at the phase boundary
+        run: python3 -B .github/scripts/publication_policy.py ci-check --state "$KIRA_CI_ROOT/before.json"
+
+      # Same inputs/outputs, offline export. Descriptor execution is allowed in EXPORT;
+      # this is not the separate no-regeneration promotion and does not rerun check.
+      - name: Export existing candidate production bytes offline
+        id: export
+        if: ${{ steps.eligibility.outputs.candidate == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --offline --no-daemon --no-parallel --max-workers=1 --console=plain \
+            --no-build-cache --no-configuration-cache \
+            '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
+            -Pkotlin.compiler.execution.strategy=in-process \
+            -PkiraPublicationMode=export :exportKiraPublicationBytes \
+            2>&1 | tee "$KIRA_CI_ROOT/diagnostics/export.log"
+
+      - name: Stop only this job's owned Gradle workers after export
+        if: ${{ always() && (steps.export.outcome == 'success' || steps.export.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -L "$GRADLE_USER_HOME" ]] || { echo '::error::Refusing redirected Gradle home'; exit 1; }
+          for gradle in "$GRADLE_USER_HOME"/wrapper/dists/gradle-9.6.1-bin/*/gradle-9.6.1/bin/gradle; do
+            [[ -f "$gradle" && -x "$gradle" && ! -L "$gradle" ]] || continue
+            "$gradle" --offline --no-daemon --stop 2>&1 | tee "$KIRA_CI_ROOT/diagnostics/stop-export.log"
+            exit 0
+          done
+          [[ ! -d "$GRADLE_USER_HOME/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; exit 1; }
+          echo 'No installed owned Gradle runtime; no stop/bootstrap needed.'
+
+      - name: Compare all committed inputs after checks/export
+        run: python3 -B .github/scripts/publication_policy.py ci-check --state "$KIRA_CI_ROOT/before.json"
+
+      - name: Validate complete sealed bundle and archive it once
+        id: pack
+        if: ${{ steps.eligibility.outputs.candidate == 'true' }}
+        run: >-
+          python3 -B .github/scripts/publication_policy.py pack
+          --state "$KIRA_CI_ROOT/before.json"
+          --output "$KIRA_CI_ROOT/kira-publication-bytes.tar"
+
+      - name: Upload the exact archive (never overwrite)
+        id: upload
+        if: ${{ steps.eligibility.outputs.candidate == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-publication-bytes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KIRA_CI_ROOT }}/kira-publication-bytes.tar
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 3
+
+      - name: Retain action output receipt outside the sealed archive
+        if: ${{ steps.eligibility.outputs.candidate == 'true' }}
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          TRANSPORT_SHA256: ${{ steps.upload.outputs.artifact-digest }}
+          ARCHIVE_SHA256: ${{ steps.pack.outputs.archive_sha256 }}
+          INVENTORY_SHA256: ${{ steps.pack.outputs.inventory_sha256 }}
+          SEAL_SHA256: ${{ steps.pack.outputs.seal_sha256 }}
+          SOURCE_TREE: ${{ steps.eligibility.outputs.source_tree }}
+          WORKFLOW_SHA256: ${{ steps.eligibility.outputs.workflow_sha256 }}
+          COMMITTED_VERSION: ${{ steps.eligibility.outputs.version }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, '.github/scripts')
+          from publication_policy import hex_value, require
+          require(os.environ['ARTIFACT_ID'].isdigit() and int(os.environ['ARTIFACT_ID']) > 0, 'Missing immutable artifact ID')
+          keys = ('TRANSPORT_SHA256', 'ARCHIVE_SHA256', 'INVENTORY_SHA256', 'SEAL_SHA256', 'WORKFLOW_SHA256')
+          require(all(hex_value(os.environ[k]) for k in keys), 'Missing distinct digest output')
+          receipt = {k.lower(): os.environ[k] for k in (*keys, 'ARTIFACT_ID', 'SOURCE_TREE')}
+          receipt.update(source_sha=os.environ['GITHUB_SHA'], workflow_ref=os.environ['GITHUB_WORKFLOW_REF'],
+                         workflow_sha=os.environ['GITHUB_WORKFLOW_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                         run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], repository=os.environ['GITHUB_REPOSITORY'],
+                         version=os.environ['COMMITTED_VERSION'], scope='candidate-transport-not-completed-receipt')
+          text = json.dumps(receipt, sort_keys=True, indent=2)
+          with (pathlib.Path(os.environ['KIRA_CI_ROOT']) / 'upload-receipt.json').open('x') as f:
+              f.write(text + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('### Candidate transport receipt — not release approval\n```json\n' + text + '\n```\n')
+          PY
+
+      - name: Always stop owned workers and preserve diagnostics before cleanup
+        id: diagnostics
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        shell: bash
+        env:
+          OWNED_ROOT: ${{ steps.runtime.outputs.root }}
+          JAVA_OUTCOME: ${{ steps.java.outcome }}
+          ADMISSION_OUTCOME: ${{ steps.eligibility.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          EXPORT_OUTCOME: ${{ steps.export.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set -euo pipefail
+          root="$OWNED_ROOT"
+          [[ "$root" == "$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && -d "$root" && ! -L "$root" ]]
+          [[ ! -L "$root/diagnostics" ]]
+          mkdir -p "$root/diagnostics"
+          printf 'ready=true\n' >> "$GITHUB_OUTPUT"
+          printf 'java=%s\nadmission=%s\nbuild=%s\nexport=%s\narchive_upload=%s\n' \
+            "$JAVA_OUTCOME" "$ADMISSION_OUTCOME" "$BUILD_OUTCOME" "$EXPORT_OUTCOME" "$UPLOAD_OUTCOME" \
+            > "$root/diagnostics/phase-outcomes.txt"
+          status=0
+          stop_owned_gradle() {
+            [[ ! -L "$root/gradle" ]] || { echo '::error::Refusing redirected Gradle home'; return 1; }
+            for gradle in "$root"/gradle/wrapper/dists/gradle-9.6.1-bin/*/gradle-9.6.1/bin/gradle; do
+              [[ -f "$gradle" && -x "$gradle" && ! -L "$gradle" ]] || continue
+              GRADLE_USER_HOME="$root/gradle" "$gradle" --offline --no-daemon --stop
+              return
+            done
+            [[ ! -d "$root/gradle/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; return 1; }
+            echo 'No installed owned Gradle runtime; no stop/bootstrap needed.'
+          }
+          if [[ "$JAVA_OUTCOME" == success ]]; then
+            if ! stop_owned_gradle 2>&1 | tee "$root/diagnostics/final-stop.log"; then status=1; fi
+          else
+            echo 'Java setup did not complete; no Gradle invocation attempted.' | tee "$root/diagnostics/final-stop.log"
+          fi
+          for receipt in before.json upload-receipt.json; do
+            if [[ -f "$root/$receipt" && ! -L "$root/$receipt" ]]; then
+              if ! cp "$root/$receipt" "$root/diagnostics/$receipt"; then status=1; fi
+            fi
+          done
+          # Preserve the original bytes if the candidate upload failed; this diagnostic
+          # artifact is NOT a substitute candidate artifact ID or provenance subject.
+          if [[ -L "$root/kira-publication-bytes.tar" ]]; then
+            echo '::error::Refusing redirected archive diagnostics'; status=1
+          elif [[ "$UPLOAD_OUTCOME" != success && -f "$root/kira-publication-bytes.tar" ]]; then
+            if ! cp "$root/kira-publication-bytes.tar" "$root/diagnostics/"; then status=1; fi
+          fi
+          if [[ "$ADMISSION_OUTCOME" == success ]]; then
+            for module in root source-contract source-engine source-testkit; do
+              parent="$GITHUB_WORKSPACE"
+              if [[ "$module" != root ]]; then parent="$parent/$module"; fi
+              if [[ ! -d "$parent" || -L "$parent" || -L "$parent/build" ]]; then
+                echo "::error::Refusing unowned report parent: $parent"; status=1; continue
+              fi
+              for kind in reports test-results; do
+                if [[ -L "$parent/build/$kind" ]]; then
+                  echo "::error::Refusing redirected report root: $parent/build/$kind"; status=1
+                elif [[ -d "$parent/build/$kind" ]]; then
+                  # tar does not dereference links or gather unrelated build/cache files.
+                  if ! tar -cf "$root/diagnostics/$module-$kind.tar" -C "$parent/build" "$kind"; then status=1; fi
+                fi
+              done
+            done
+          fi
+          exit "$status"
+
+      - name: Upload diagnostics and receipts even after a failed phase
+        id: diagnostics_upload
+        if: ${{ always() && steps.diagnostics.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-ci-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.runtime.outputs.root }}/diagnostics
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
+
+      - name: Always clean only this job's admitted outputs and owned runtime
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        shell: bash
+        env:
+          OWNED_ROOT: ${{ steps.runtime.outputs.root }}
+          ADMISSION_OUTCOME: ${{ steps.eligibility.outcome }}
+          PRESERVE_OUTCOME: ${{ steps.diagnostics.outcome }}
+          EVIDENCE_OUTCOME: ${{ steps.diagnostics_upload.outcome }}
+        run: |
+          set -euo pipefail
+          root="$OWNED_ROOT"
+          [[ "$root" == "$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && ! -L "$root" ]]
+          note() { printf '%s\n' "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          if [[ "$PRESERVE_OUTCOME" != success || "$EVIDENCE_OUTCOME" != success ]]; then
+            note '::error::Cleanup deferred: owned stop/evidence capture/upload failed; outputs and runtime retained, not reported clean.'
+            exit 1
+          fi
+          status=0
+          if [[ "$ADMISSION_OUTCOME" == success ]]; then
+            # Exact GENERATED roots admitted absent by ci-start; never Gradle clean,
+            # global caches, source/configuration or unadmitted pre-existing outputs.
+            for relative in .gradle .kotlin build source-contract/build source-engine/build source-testkit/build; do
+              parent="$GITHUB_WORKSPACE"
+              if [[ "$relative" == */* ]]; then parent="$parent/${relative%/*}"; fi
+              if [[ ! -d "$GITHUB_WORKSPACE" || -L "$GITHUB_WORKSPACE" || ! -d "$parent" || -L "$parent" ]]; then
+                note "::error::Refusing unowned cleanup parent: $parent"; status=1; continue
+              fi
+              target="$GITHUB_WORKSPACE/$relative"
+              if rm -rf -- "$target" && [[ ! -e "$target" && ! -L "$target" ]]; then
+                note "Owned generated root absent after cleanup: $relative"
+              else
+                note "::error::Owned generated root cleanup failed: $relative"; status=1
+              fi
+            done
+          else
+            note 'Generated-root cleanup skipped: fresh source admission did not succeed; no ownership assumed.'
+          fi
+          if rm -rf -- "$root" && [[ ! -e "$root" && ! -L "$root" ]]; then
+            note 'Owned Gradle/Konan/tmp, captured archive/receipts and runtime root absent after cleanup.'
+          else
+            note '::error::Owned runtime cleanup failed.'; status=1
+          fi
+          exit "$status"
+
+  attest:
+    name: attest
+    needs: verify
+    if: >-
+      ${{ needs.verify.result == 'success' && needs.verify.outputs.candidate == 'true' &&
+          github.event_name == 'push' && github.repository == 'kira-manga/kira-source-engine' &&
+          github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04' &&
+          github.workflow_sha == github.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Provenance privileges only. No packages:write, remote Maven destination, PAT or publisher.
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      EXPECTED_VERSION: ${{ needs.verify.outputs.version }}
+      EXPECTED_SOURCE_TREE: ${{ needs.verify.outputs.source_tree }}
+      EXPECTED_WORKFLOW_SHA256: ${{ needs.verify.outputs.workflow_sha256 }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.verify.outputs.archive_sha256 }}
+      EXPECTED_INVENTORY_SHA256: ${{ needs.verify.outputs.inventory_sha256 }}
+      EXPECTED_SEAL_SHA256: ${{ needs.verify.outputs.seal_sha256 }}
+    steps:
+      - name: Check out the exact producer source for read-only intake
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare owned intake outside checkout
+        id: intake_runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/kira-attest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$root"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'KIRA_ATTEST_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
+
+      - name: Download only the immutable artifact ID from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact_id }}
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.KIRA_ATTEST_ROOT }}
+          merge-multiple: true
+
+      - name: Recheck raw archive, seal and inventory before attesting
+        id: intake
+        run: >-
+          python3 -B .github/scripts/publication_policy.py intake
+          --archive "$KIRA_ATTEST_ROOT/kira-publication-bytes.tar"
+          --inventory "$KIRA_ATTEST_ROOT/inventory.tsv"
+
+      # Unsupported private-repository capability fails here; no unsigned/PAT fallback.
+      # Final success/run-attempt/native verification intake is a LATER read-only operation.
+      - name: Attest exactly the archive and original inventory bytes
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            ${{ env.KIRA_ATTEST_ROOT }}/kira-publication-bytes.tar
+            ${{ env.KIRA_ATTEST_ROOT }}/inventory.tsv
+          push-to-registry: false
+          show-summary: true
+
+      - name: Always clean this job's owned intake (original artifact retained)
+        if: ${{ always() && steps.intake_runtime.outputs.root != '' }}
+        shell: bash
+        env:
+          OWNED_INTAKE_ROOT: ${{ steps.intake_runtime.outputs.root }}
+          INTAKE_OUTCOME: ${{ steps.intake.outcome }}
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+        run: |
+          set -euo pipefail
+          root="$OWNED_INTAKE_ROOT"
+          [[ "$root" == "$RUNNER_TEMP/kira-attest-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && ! -L "$root" ]]
+          printf 'Attestation intake=%s; provenance=%s. Original archive/inventory remain in the immutable producer artifact; action logs/summary retain diagnostics.\n' \
+            "$INTAKE_OUTCOME" "$PROVENANCE_OUTCOME" | tee -a "$GITHUB_STEP_SUMMARY"
+          if rm -rf -- "$root" && [[ ! -e "$root" && ! -L "$root" ]]; then
+            echo 'Owned attestation intake absent after cleanup.' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::error::Owned attestation intake cleanup failed.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
