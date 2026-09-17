@@ -30,10 +30,12 @@ ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew -PVERSION_NAME=0.1.0 \
   -Dmaven.repo.local="$PWD/build/local-maven" publishToMavenLocal
 ```
 
-These commands are not evidence that release gates passed. Ordinary CI is unchanged and
-currently selects Java17; alignment with the Java21/SDK37 owner requirements remains a
-separate CI-hygiene obligation. Targets, publication components, Kotlin/API levels and the
-committed `VERSION_NAME=0.1.0-SNAPSHOT` default are unchanged.
+These commands are not evidence that release gates passed. CI selects Java21 and checks
+the existing SDK's API37 metadata and `android.jar`, accepting real `android-37` and
+`android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
+fail; CI does not install, rename or alias a platform to pass this check. Targets,
+publication components, Kotlin/API levels and the committed `VERSION_NAME=0.1.0-SNAPSHOT`
+default are unchanged. CI's candidate/noncandidate distinction is described below.
 
 ## Remote publication: current-source containment only
 
@@ -63,8 +65,8 @@ is not a native/package publication result.
 ## Stage A: unqualified owned-file byte export and promotion
 
 **Source implementation only: no real KMP export/promotion pass is claimed. These command
-shapes do not authorize execution.** No workflow, toolchain, target, module build, runtime
-contract or consumer changes accompany this gate. Ordinary builds without
+shapes do not authorize execution.** Stage A changes no toolchain, target, module build, runtime
+contract or consumer; the separate Stage B workflow recipe is described below. Ordinary builds without
 `kiraPublicationMode` add no publishing repository and retain Maven-local behavior.
 
 After separate admission, `gradle/publication-gates.gradle.kts` has two local modes. Both
@@ -169,6 +171,122 @@ trusted production/approval nor remote immutability, external-writer exclusion o
 acceptance. The credential-absence check uses the separately reviewed, pinned Gradle9.6.1
 internal presence API (never credential values); no internal/custom publisher is used.
 
+## Stage B: check-only CI today; candidate provenance recipe, not a publisher
+
+**The committed version is still `0.1.0-SNAPSHOT`.** That path runs the ordinary `check`
+coverage and the small stdlib policy tests, reports **no candidate produced**, and skips
+export, candidate artifact upload and attestation. Diagnostics are still retained.
+A green check-only run is not a producer receipt.
+This source recipe does not authorize a CI dispatch, acquisition, new release version or
+publication, and does not claim a successful hosted macOS/Android/Apple producer run.
+
+`ci.yml` accepts pushes and PRs targeting only
+`remediation/production-readiness-2026-09-04`. There is no main/tag/dispatch/alternate-ref
+candidate route. PRs are read-only and ineligible. Checkout does not persist credentials.
+Candidate eligibility additionally requires the exact repository
+`kira-manga/kira-source-engine`, trusted integration push, matching checked-out source and
+workflow SHA/ref, and one canonical `X.Y.Z` in **committed** `gradle.properties`. Duplicate,
+escaped or ambiguous properties, prereleases and ambient version/JVM overrides refuse.
+No tag, CLI argument or environment value supplies a candidate version.
+
+For an eventually owner-approved canonical commit, the recipe is deliberately linear:
+
+1. Bind the full committed source SHA/tree, workflow bytes and every tracked file/mode.
+   Reject dirty/deleted inputs, staged changes and unexpected additions, including ignored
+   build scripts. Only the explicit root `.gradle`, `.kotlin`, `build` and three module
+   `build` output directories are exempt **after** fresh-workspace admission, not arbitrary
+   `**/build` paths. Recheck at the phase boundary, after export and during archive creation.
+2. In **one macOS workspace**, run one ordinary online `check` invocation together with the
+   thirty native POM/GMM generator roots (three modules × two generators × five publications).
+   This invocation has no `kiraPublicationMode`. It is followed, on success only, by the same
+   workspace's offline `:exportKiraPublicationBytes` with explicit export mode. No Maven-local,
+   second producer, target sharding, arbitrary exclusions, test rerun in export or promotion.
+3. Use fresh job-owned Gradle/Native homes, no dependency/project-output cache restore, no
+   build/configuration cache, one worker, in-process Kotlin compilation, bounded heap and a
+   job timeout. Stop the owned Gradle workers between phases and after export. Hosted tool
+   and resource admission remains separate; `--offline` is not a network sandbox and cache
+   presence is not provenance. Descriptor execution during export remains allowed; this is
+   not the separate promotion's no-regeneration proof.
+4. Validate the existing exact bundle and its source/model/seal relationships, then create
+   one uncompressed USTAR archive without changing bundle contents. Intake rejects duplicate,
+   missing/extra, traversal, link/device and extension entries and never extracts over source.
+   All raw artifacts, including AAR/KLIB/source/POM/GMM bytes, are included. Checksum inventory
+   rows remain **expected sidecars**, not fabricated archive payloads. The helper does not
+   replace the Gradle native KMP/POM model or hardcode an observed payload count. Parser bounds
+   are 8MiB per metadata/source file, 4096 entries/records and 512MiB per bundle/archive;
+   exceeding them is a refusal requiring review, not truncation or target removal.
+5. Upload the single archive using the pinned official artifact action, an exact
+   `kira-publication-bytes-<run-id>-<attempt>` name, error-on-missing and no overwrite. Keep
+   **four different SHA256 values** distinct: raw tar, `inventory.tsv` (manifest),
+   `seal.sha256` itself, and GitHub's transport artifact digest. The immutable artifact ID
+   and action outputs are retained outside the sealed tar, including the run step summary;
+   the tar is never rewritten to contain its own receipt.
+
+A separate lightweight `attest` job is conditioned on successful eligible production and the
+same exact trusted source/workflow/ref. It downloads **only the producer's artifact ID**,
+rechecks the independently retained raw/manifest/seal digests and committed inputs, and uses
+the pinned official attestation action on exactly `kira-publication-bytes.tar` and the original
+`inventory.tsv` bytes. It does not build or promote. Only this job requests `actions: read`,
+`contents: read`, `id-token: write` and `attestations: write`; these are explicit provenance
+privileges, **not** package-write privileges or proof of private-repository capability.
+Unsupported capability fails the route; no unsigned or hidden-PAT fallback exists.
+
+### Later read-only completed-receipt intake
+
+The in-progress producer/attester does **not** certify its workflow's own final success.
+`.github/scripts/publication_policy.py receipt` is an offline saved-receipt comparison,
+not proof of live freshness and not a release-authorizing command or remote writer.
+The connected intake described below acquires and compares fresh official receipts. It requires a separately reviewed fresh checkout
+and expected identity/digests, final official attempt/current-run/job/artifact REST receipts,
+the exact archive, an attestation bundle, and a separately admitted native verifier asset.
+Expected values must come from the reviewed caller, **never from the artifact under test**.
+
+The expected document contains the literal repository/ref/workflow ref, source SHA/tree,
+workflow SHA and SHA256, committed version, integer run/attempt/workflow/producer-job/
+attestation-job/artifact IDs, and the four separate digests named above. The receipt document
+has `attempt`, `current`, `jobs` and `artifact` objects from the corresponding official REST
+endpoints. The caller must acquire/authenticate fresh receipts for the selected IDs, including
+the attempt-specific jobs list; author-written JSON is not an API origin guarantee. Intake
+rejects failed/in-progress or superseded attempts, pagination/missing jobs, expired/deleted/
+replaced artifacts and wrong-run or wrong-byte substitution. Never select “latest successful”.
+
+An artifact REST object alone cannot establish its run attempt. The adapter additionally runs
+native signature/certificate verification and compares the **verified certificate's** signer,
+source, workflow and `runInvocationURI` (including `/runs/<id>/attempts/<attempt>`), then the
+exact archive and inventory subjects against independently measured bytes. It does not use
+workflow-controlled predicate metadata as signer/source/invocation authority. Decoded DSSE,
+`attested: true`, log text, supplied “verified” JSON or exit0 without those comparisons refuse.
+
+The native adapter admits only the official Linux-amd64
+[`gh_2.100.0_linux_amd64.tar.gz`](https://github.com/cli/cli/releases/tag/v2.100.0), SHA256
+`e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be`. It makes no acquisition,
+uses no ambient `gh` or token/config, and copies only the fixed executable member into an
+owned temporary directory after checking that asset pin. Later native verification may refresh
+public trust roots; it is not claimed to be network-isolated. Its flags and strict output
+adapter follow [CLI source `45437bc7`](https://github.com/cli/cli/blob/45437bc7eeeb3359bbfddd1742f79de7652fd3e2/pkg/cmd/attestation/verify/verify.go)
+and [sigstore-go `22d3691c`](https://github.com/sigstore/sigstore-go/blob/22d3691c7b8e0c5530fae3c05577690bfef5cd00/pkg/fulcio/certificate/summarize.go)
+(flat certificate extension fields, no guessed nested-schema fallback). Action pins and the
+actual native adapter require independent source review before operational admission.
+
+The helper's complete approval-tuple/readback comparisons are only finite refusal tests.
+Even matching facts retain a **Stage C authority/live-recheck hold**. They mint neither
+approval nor unused-GAV evidence; any used/partial cohort or rerun holds. Protected lineage,
+publisher identity, immutable complete-GAV authority, all-writer serialization, remote readers
+and final App/Backend parity remain external gates. The Stage A gate's exact Java runtime,
+vendor, OS and architecture binding also remains; saying “Java21” on another publisher host
+does not establish compatibility.
+
+The focused nonrelease test command is:
+
+```bash
+python3 -B -m unittest discover -s .github/scripts -p 'test_publication_policy.py' -v
+```
+
+The original 26 synthetic policy tests exercise comparisons/serialization with mocked native
+subprocesses and Git; the same command also includes nine real-Git lineage tests. Neither
+proves production bytes, signatures, consumer parity or remote qualification. YAML
+trigger/permission/action/phase review remains a separate obligation.
+
 ## Gates still required before any remote activation
 
 | Gate | Still open; not implemented or waived by containment |
@@ -190,9 +308,9 @@ their previously accepted scopes.
 
 ## Read-only release lineage observation
 
-The product policy helper and its existing Stage B tests are retained without adopting
-the separate candidate CI recipe. Both workflows and all remote-publication containment
-remain unchanged. The `lineage` command adds only local Git tag/version/ancestry checks:
+The `lineage` increment added only local Git tag/version/ancestry checks and did not change
+workflows. The separate Stage B CI recipe is now wired as described above; the publisher
+and remote-publication containment remain unchanged. The read-only command is:
 
 ```bash
 python3 -B .github/scripts/publication_policy.py --root "$RELEASE_REPOSITORY" lineage \
