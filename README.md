@@ -175,7 +175,8 @@ internal presence API (never credential values); no internal/custom publisher is
 
 **The committed version is still `0.1.0-SNAPSHOT`.** That path runs the ordinary `check`
 coverage and the small stdlib policy tests, reports **no candidate produced**, and skips
-export, artifact upload and attestation. A green check-only run is not a producer receipt.
+export, candidate artifact upload and attestation. Diagnostics are still retained.
+A green check-only run is not a producer receipt.
 This source recipe does not authorize a CI dispatch, acquisition, new release version or
 publication, and does not claim a successful hosted macOS/Android/Apple producer run.
 
@@ -281,9 +282,10 @@ The focused nonrelease test command is:
 python3 -B -m unittest discover -s .github/scripts -p 'test_publication_policy.py' -v
 ```
 
-These small synthetic fixtures exercise comparisons/serialization only; native subprocesses
-and Git are mocked. They are not real production bytes, signatures, consumer parity or remote
-qualification. YAML trigger/permission/action/phase review is a separate obligation.
+The original 26 synthetic policy tests exercise comparisons/serialization with mocked native
+subprocesses and Git; the same command also includes nine real-Git lineage tests. Neither
+proves production bytes, signatures, consumer parity or remote qualification. YAML
+trigger/permission/action/phase review remains a separate obligation.
 
 ## Gates still required before any remote activation
 
@@ -306,9 +308,9 @@ their previously accepted scopes.
 
 ## Read-only release lineage observation
 
-The product policy helper and its existing Stage B tests are retained without adopting
-the separate candidate CI recipe. Both workflows and all remote-publication containment
-remain unchanged. The `lineage` command adds only local Git tag/version/ancestry checks:
+The `lineage` increment added only local Git tag/version/ancestry checks and did not change
+workflows. The separate Stage B CI recipe is now wired as described above; the publisher
+and remote-publication containment remain unchanged. The read-only command is:
 
 ```bash
 python3 -B .github/scripts/publication_policy.py --root "$RELEASE_REPOSITORY" lineage \
