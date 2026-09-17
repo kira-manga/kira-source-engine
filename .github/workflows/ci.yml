@@ -1,4 +1,4 @@
-name: App29 NONSHIPPING exact Android input recovery
+name: App29 NONSHIPPING exact Android and simulator input recovery
 
 on:
   workflow_dispatch:
@@ -15,12 +15,12 @@ jobs:
     if: >-
       github.repository == 'kira-manga/kira-source-engine' &&
       github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/validation/app29-history-android-input-recovery-20260917-01' &&
+      github.ref == 'refs/heads/validation/app29-history-android-input-recovery-20260917-02' &&
       github.run_attempt == 1
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Recover only the two exact original Android AARs
+      - name: Recover only the four exact original Android and simulator binaries
         id: recover
         timeout-minutes: 2
         shell: bash
@@ -34,14 +34,35 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import re
           import shutil
           import ssl
           import urllib.error
+          import urllib.parse
           import urllib.request
 
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   return None
+
+          def redirect_url(module, current_url, location):
+              if not location or len(location) > 8192 or any(ord(c) <= 32 or ord(c) == 127 for c in location):
+                  raise ValueError("Invalid redirect")
+              candidate = urllib.parse.urljoin(current_url, location)
+              if len(candidate) > 8192:
+                  raise ValueError("Invalid redirect")
+              parts = urllib.parse.urlsplit(candidate)
+              host = parts.hostname or ""
+              if (parts.scheme != "https" or parts.username is not None or parts.password is not None
+                      or parts.port not in (None, 443) or parts.fragment):
+                  raise ValueError("Invalid redirect")
+              if (len(host) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                           for label in host.split("."))
+                      or parts.netloc.lower() not in (host, host + ":443")):
+                  raise ValueError("Invalid redirect hostname")
+              if host != "maven.pkg.github.com" and not host.endswith(".githubusercontent.com"):
+                  raise SystemExit(f"{module}: redirect hostname refused: {host}.")
+              return candidate
 
           user = os.environ.pop("KIRA_PACKAGES_USER", "")
           token = os.environ.pop("KIRA_PACKAGES_READ_TOKEN", "")
@@ -54,34 +75,49 @@ jobs:
               NoRedirect(),
           )
           inputs = (
-              ("source-engine-android", 104261,
+              ("source-engine-android", "aar", 104261,
                "94316feb00f9c4acb3c8268faa957f8609e04a85f9beecb59a4b1d99fb5fa651"),
-              ("source-contract-android", 128977,
+              ("source-contract-android", "aar", 128977,
                "00e18971d896a537afb6485b2919352848a028e7bfaca8e8ce9e955d9b8d1185"),
+              ("source-engine-iossimulatorarm64", "klib", 147672,
+               "073d8306be3d9b478819ed3efd0330fe988d214a8ba3a2d13347c4778eb924ba"),
+              ("source-contract-iossimulatorarm64", "klib", 111167,
+               "9ca9b3a488199079f88979814b34bbf49564f202bffb4fb886f5aba914d6c260"),
           )
           payloads = {}
           receipt = []
-          for module, size, expected in inputs:
-              name = f"{module}-0.1.0.aar"
+          for module, extension, size, expected in inputs:
+              name = f"{module}-0.1.0.{extension}"
               url = ("https://maven.pkg.github.com/kira-manga/kira-source-engine/"
                      f"me/manga/kira/source/{module}/0.1.0/{name}")
-              request = urllib.request.Request(url, method="GET", headers={
-                  "Authorization": authorization,
-                  "Accept-Encoding": "identity",
-              })
               try:
-                  with opener.open(request, timeout=20) as response:
-                      if response.status != 200 or response.geturl() != url:
-                          raise ValueError("Unexpected response")
-                      if response.headers.get("Content-Encoding", "identity").lower() != "identity":
-                          raise ValueError("Unexpected encoding")
-                      length = response.headers.get("Content-Length")
-                      if length is not None and length != str(size):
-                          raise ValueError("Unexpected declared size")
-                      payload = response.read(size + 1)
-              except urllib.error.HTTPError as error:
-                  error.close()
-                  raise SystemExit(f"{module}: HTTP {error.code}; recovery stopped.") from None
+                  for hop in range(4):  # Initial GET plus at most three redirects; no retries.
+                      headers = {"Accept-Encoding": "identity"}
+                      if hop == 0:
+                          headers["Authorization"] = authorization
+                      request = urllib.request.Request(url, method="GET", headers=headers)
+                      try:
+                          with opener.open(request, timeout=20) as response:
+                              if response.status != 200 or response.geturl() != url:
+                                  raise ValueError("Unexpected response")
+                              if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                                  raise ValueError("Unexpected encoding")
+                              length = response.headers.get("Content-Length")
+                              if length is not None and length != str(size):
+                                  raise ValueError("Unexpected declared size")
+                              payload = response.read(size + 1)
+                          break
+                      except urllib.error.HTTPError as error:
+                          code = error.code
+                          location = error.headers.get("Location")
+                          error.close()  # Never read or log error/redirect response bodies.
+                          if code not in (301, 302, 303, 307, 308):
+                              raise SystemExit(f"{module}: HTTP {code}; recovery stopped.") from None
+                          if hop == 3:
+                              raise SystemExit(f"{module}: redirect limit exceeded; recovery stopped.") from None
+                          url = redirect_url(module, url, location)
+                  else:
+                      raise ValueError("Redirect limit")
               except Exception:
                   raise SystemExit(f"{module}: download refused or failed; recovery stopped.") from None
               actual = hashlib.sha256(payload).hexdigest()
@@ -90,7 +126,7 @@ jobs:
               payloads[name] = payload
               receipt.append({"file": name, "bytes": len(payload), "sha256": actual})
 
-          target = Path(os.environ["RUNNER_TEMP"]) / f"app29-history-android-inputs-{os.environ['GITHUB_RUN_ID']}"
+          target = Path(os.environ["RUNNER_TEMP"]) / f"app29-history-original-inputs-{os.environ['GITHUB_RUN_ID']}"
           target.mkdir(mode=0o700)
           try:
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -100,20 +136,22 @@ jobs:
               (target / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
           except BaseException:
               shutil.rmtree(target)
-              raise SystemExit("Unable to stage the verified Android inputs.") from None
-          print("Verified the two fixed Android input payloads; no build was run.")
+              raise SystemExit("Unable to stage the verified original inputs.") from None
+          print("Verified the four fixed original input payloads; no build was run.")
           PY
 
-      - name: Upload only verified user-owned Android inputs and hashes
+      - name: Upload only four verified user-owned binaries and hashes
         if: ${{ success() && steps.recover.outputs.owned == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         timeout-minutes: 1
         with:
-          name: app29-history-android-inputs-${{ github.run_id }}
+          name: app29-history-original-inputs-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/source-engine-android-0.1.0.aar
-            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/source-contract-android-0.1.0.aar
-            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/receipt.json
+            ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}/source-engine-android-0.1.0.aar
+            ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}/source-contract-android-0.1.0.aar
+            ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}/source-engine-iossimulatorarm64-0.1.0.klib
+            ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}/source-contract-iossimulatorarm64-0.1.0.klib
+            ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}/receipt.json
           if-no-files-found: error
           retention-days: 2
           compression-level: 0
@@ -123,5 +161,5 @@ jobs:
         timeout-minutes: 1
         shell: bash
         env:
-          INPUT_DIR: ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}
+          INPUT_DIR: ${{ runner.temp }}/app29-history-original-inputs-${{ github.run_id }}
         run: rm -rf -- "$INPUT_DIR"
