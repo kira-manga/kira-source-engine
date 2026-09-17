@@ -1,33 +1,127 @@
-name: Shared source engine CI
+name: App29 NONSHIPPING exact Android input recovery
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - "feature/**"
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  packages: read
 
 concurrency:
-  group: source-engine-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: kira-app29-history-android-input-recovery
+  cancel-in-progress: false
 
 jobs:
-  verify:
-    runs-on: macos-15
-    timeout-minutes: 30
+  recover:
+    if: >-
+      github.repository == 'kira-manga/kira-source-engine' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/validation/app29-history-android-input-recovery-20260917-01' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Check out source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Recover only the two exact original Android AARs
+        id: recover
+        timeout-minutes: 2
+        shell: bash
+        env:
+          KIRA_PACKAGES_USER: ${{ github.actor }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import ssl
+          import urllib.error
+          import urllib.request
 
-      - name: Set up Java
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          user = os.environ.pop("KIRA_PACKAGES_USER", "")
+          token = os.environ.pop("KIRA_PACKAGES_READ_TOKEN", "")
+          if not user or not token:
+              raise SystemExit("Own-repository package-read credentials are unavailable.")
+          authorization = "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()
+          opener = urllib.request.build_opener(
+              urllib.request.ProxyHandler({}),
+              urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+              NoRedirect(),
+          )
+          inputs = (
+              ("source-engine-android", 104261,
+               "94316feb00f9c4acb3c8268faa957f8609e04a85f9beecb59a4b1d99fb5fa651"),
+              ("source-contract-android", 128977,
+               "00e18971d896a537afb6485b2919352848a028e7bfaca8e8ce9e955d9b8d1185"),
+          )
+          payloads = {}
+          receipt = []
+          for module, size, expected in inputs:
+              name = f"{module}-0.1.0.aar"
+              url = ("https://maven.pkg.github.com/kira-manga/kira-source-engine/"
+                     f"me/manga/kira/source/{module}/0.1.0/{name}")
+              request = urllib.request.Request(url, method="GET", headers={
+                  "Authorization": authorization,
+                  "Accept-Encoding": "identity",
+              })
+              try:
+                  with opener.open(request, timeout=20) as response:
+                      if response.status != 200 or response.geturl() != url:
+                          raise ValueError("Unexpected response")
+                      if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                          raise ValueError("Unexpected encoding")
+                      length = response.headers.get("Content-Length")
+                      if length is not None and length != str(size):
+                          raise ValueError("Unexpected declared size")
+                      payload = response.read(size + 1)
+              except urllib.error.HTTPError as error:
+                  error.close()
+                  raise SystemExit(f"{module}: HTTP {error.code}; recovery stopped.") from None
+              except Exception:
+                  raise SystemExit(f"{module}: download refused or failed; recovery stopped.") from None
+              actual = hashlib.sha256(payload).hexdigest()
+              if len(payload) != size or actual != expected:
+                  raise SystemExit(f"{module}: exact payload verification failed.")
+              payloads[name] = payload
+              receipt.append({"file": name, "bytes": len(payload), "sha256": actual})
+
+          target = Path(os.environ["RUNNER_TEMP"]) / f"app29-history-android-inputs-{os.environ['GITHUB_RUN_ID']}"
+          target.mkdir(mode=0o700)
+          try:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write("owned=true\n")
+              for name, payload in payloads.items():
+                  (target / name).write_bytes(payload)
+              (target / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          except BaseException:
+              shutil.rmtree(target)
+              raise SystemExit("Unable to stage the verified Android inputs.") from None
+          print("Verified the two fixed Android input payloads; no build was run.")
+          PY
+
+      - name: Upload only verified user-owned Android inputs and hashes
+        if: ${{ success() && steps.recover.outputs.owned == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 1
         with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
+          name: app29-history-android-inputs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/source-engine-android-0.1.0.aar
+            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/source-contract-android-0.1.0.aar
+            ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}/receipt.json
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
 
-      - name: Verify all targets and publications
-        run: ./gradlew --no-daemon check publishToMavenLocal
+      - name: Always remove this run's owned recovery scratch
+        if: ${{ always() && steps.recover.outputs.owned == 'true' }}
+        timeout-minutes: 1
+        shell: bash
+        env:
+          INPUT_DIR: ${{ runner.temp }}/app29-history-android-inputs-${{ github.run_id }}
+        run: rm -rf -- "$INPUT_DIR"
