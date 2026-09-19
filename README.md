@@ -383,6 +383,30 @@ Focused synthetic HTTP-boundary tests (no real API, credentials or provenance):
 PYTHONPATH=.github/scripts python3 -B -m unittest test_github_publication_receipts -v
 ```
 
+### Dormant environment/branch-policy observation
+
+The same adapter provides the programmatic-only
+`acquire_environment_configuration(name, environment_id, expected_policies, *, token=None)`.
+The caller independently selects the environment and complete policy records (`id`, `name`,
+`type`, explicitly `branch` or `tag`). Inputs are copied before GET; 1–100 unique policies,
+positive signed-64-bit IDs and bounded printable names are required. It reads the exact
+URL-encoded environment, its one-page complete policy list, then the environment again.
+Only explicit custom-policy mode is supported; missing/changed/ambiguous metadata, unsupported
+modes, pagination and HTTP401/403/404 all refuse. Names/policy types match literally; no glob
+interpretation or response-URL following occurs. The existing bounded TLS/GET/token controls
+are reused. The result projects observed identity/mode/policies only, not raw response data.
+
+A future StageC pre-first-write caller can reacquire this independently selected publisher
+configuration alongside completed-byte intake; current producer receipts do not read it.
+There is no new CLI, receipt format or caller, and no workflow consumes this dormant entry
+point. Reviewer membership, self-review prevention, administrator bypass and actual run approval
+are **not proved**; missing bypass metadata is not false. The policy list is read once:
+the last environment read neither revalidates nor freezes that list. Matching observations
+are not an atomic snapshot, reservation, authority or release permission. StageC's unconditional
+hold, disabled publisher, SNAPSHOT version, all-writer/registry and consumer holds remain.
+Focused synthetic tests are `test_github_publication_receipts.EnvironmentConfigurationAcquisitionTests`;
+their source is not a live API or protection qualification.
+
 ### Connected completed-candidate intake (read-only)
 
 `connected_publication_intake.connected_intake(root, expected, archive, gh_asset,

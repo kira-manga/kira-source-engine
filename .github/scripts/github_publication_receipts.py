@@ -5,6 +5,7 @@ import http.client
 import re
 import ssl
 import time
+from urllib.parse import quote
 
 import publication_policy as policy
 
@@ -62,14 +63,84 @@ def _get_json(path, token):
             connection.close()
 
 
+def _validate_read_token(token):
+    policy.require(token is None or (type(token) is str and 1 <= len(token) <= 1024
+                   and re.fullmatch(r"[A-Za-z0-9_.-]+", token) is not None), "Read token syntax refused")
+
+
 def validated_request(expected, token=None):
     """Validate and copy the selection before byte/native work or any HTTP request."""
     expected = policy.copy_expected_identity(expected)
     for key in ("run_id", "run_attempt", "workflow_id", "artifact_id", "producer_job_id", "attestation_job_id"):
         policy.require(expected[key] <= 2**63 - 1, "Selected identity bound exceeded")
-    policy.require(token is None or (type(token) is str and 1 <= len(token) <= 1024
-                   and re.fullmatch(r"[A-Za-z0-9_.-]+", token) is not None), "Read token syntax refused")
+    _validate_read_token(token)
     return expected
+
+
+def _configuration_name(value):
+    policy.require(type(value) is str and 1 <= len(value) <= 255 and value.isprintable()
+                   and value == value.strip(), "Configuration name refused")
+    policy.require(len(value.encode("utf-8")) <= 1024, "Configuration name bound exceeded")
+    return value
+
+
+def _branch_policy_inventory(values, *, selected=False):
+    policy.require(type(values) in (list, tuple) and 1 <= len(values) <= 100, "Policy inventory bound refused")
+    items = []
+    for value in tuple(values):
+        policy.require(type(value) is dict, "Policy record refused")
+        value = value.copy()
+        if selected:
+            policy.require(set(value) == {"id", "name", "type"}, "Selected policy fields refused")
+        identity, name, kind = value.get("id"), value.get("name"), value.get("type")
+        policy.require(policy.positive(identity) and identity <= 2**63 - 1, "Policy identity refused")
+        policy.require(type(kind) is str and kind in ("branch", "tag"), "Policy type refused")
+        items.append((identity, _configuration_name(name), kind))
+    policy.require(len({item[0] for item in items}) == len(items)
+                   and len({item[1:] for item in items}) == len(items), "Duplicate policy refused")
+    return tuple(sorted(items))
+
+
+def _environment_identity(value, name, identity):
+    policy.require(type(value.get("id")) is int and value["id"] == identity
+                   and type(value.get("name")) is str and value["name"] == name, "Environment identity refused")
+    flags = value.get("deployment_branch_policy")
+    policy.require(type(flags) is dict and flags.get("protected_branches") is False
+                   and flags.get("custom_branch_policies") is True, "Explicit branch-policy mode required")
+    return value["id"], value["name"], flags["protected_branches"], flags["custom_branch_policies"]
+
+
+def acquire_environment_configuration(name, environment_id, expected_policies, *, token=None):
+    """Observe an independently selected environment and exact explicit branch/tag policy list.
+
+    This is NOT protected approval: reviewer/self-review/bypass settings are not proved.
+    The list is read once; the final environment read neither freezes nor revalidates it.
+    No response URL, saved receipt, environment token or caller-chosen host is consumed.
+    A future StageC caller must reacquire under its separate authority at its own boundary.
+    """
+    try:
+        name = _configuration_name(name)
+        policy.require(not any(character in name for character in "\\?#%")
+                       and all(part not in ("", ".", "..") for part in name.split("/")), "Environment path refused")
+        policy.require(policy.positive(environment_id) and environment_id <= 2**63 - 1, "Environment ID refused")
+        selected = _branch_policy_inventory(expected_policies, selected=True)
+        _validate_read_token(token)
+        path = "/repos/" + policy.REPOSITORY + "/environments/" + quote(name, safe="")
+        first = _environment_identity(_get_json(path, token), name, environment_id)
+        response = _get_json(path + "/deployment-branch-policies?per_page=100&page=1", token)
+        policies = response.get("branch_policies")
+        policy.require(type(response.get("total_count")) is int and type(policies) is list
+                       and response["total_count"] == len(policies) == len(selected), "Incomplete policy list refused")
+        observed = _branch_policy_inventory(policies)
+        policy.require(observed == selected, "Selected policy inventory changed")
+        final = _environment_identity(_get_json(path, token), name, environment_id)
+        policy.require(final == first, "Environment configuration changed")
+        return {"id": final[0], "name": final[1],
+                "deployment_branch_policy": {"protected_branches": final[2], "custom_branch_policies": final[3]},
+                "branch_policies": [{"id": identity, "name": policy_name, "type": kind}
+                                    for identity, policy_name, kind in observed]}
+    except Exception:
+        raise policy.Refusal("Environment configuration observation refused") from None
 
 
 def acquire_official_receipts(expected, token=None):
