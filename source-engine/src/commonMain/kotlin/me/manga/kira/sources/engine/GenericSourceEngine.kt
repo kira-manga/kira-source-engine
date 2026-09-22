@@ -1,6 +1,8 @@
 package me.manga.kira.source.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import me.manga.kira.source.contracts.SourceChapter
 import me.manga.kira.source.contracts.SourceChapterRef
 import me.manga.kira.source.contracts.SourceChallengeListener
@@ -29,8 +31,10 @@ import me.manga.kira.source.engine.internal.ComposedFilters
 import me.manga.kira.source.engine.internal.DateStrategies
 import me.manga.kira.source.engine.internal.Extractor
 import me.manga.kira.source.engine.internal.FilterRequestComposer
+import me.manga.kira.source.engine.internal.HttpDestination
 import me.manga.kira.source.engine.internal.ItemScope
 import me.manga.kira.source.engine.internal.JsonEscape
+import me.manga.kira.source.engine.internal.SourceHeaderPolicy
 import me.manga.kira.source.engine.internal.Templates
 import me.manga.kira.source.engine.internal.Transforms
 import me.manga.kira.source.engine.internal.UrlEncode
@@ -44,10 +48,9 @@ import me.manga.kira.source.engine.internal.UrlEncode
  * The generic path is the only executable source path. A failure is returned to the caller; no
  * legacy adapter is inferred. Golden-fixture tests remain the engine's behavioural specification.
  *
- * Stage-0 relative-link resolution uses the source's base URL (for Ksoup `abs:*` and [absolutize]).
- * Resolving against [SourceResponse.finalUrl] (cross-host redirects / path-relative links) is a
- * Stage-1 refinement and will land with redirect golden fixtures; until then a generic source must
- * declare a `baseUrl` that its relative links resolve against.
+ * Extracted relative links still use the source's base URL (for Ksoup `abs:*` and [absolutize]),
+ * not [SourceResponse.finalUrl]. GET redirects are resolved independently against each requested
+ * hop, with source headers selected before every send by immutable signed credential authority.
  *
  * The effective base URL is taken live from the active catalog projection through
  * [SourceBaseUrlProvider], falling back to [SourceConfig.baseUrl] when none is stored.
@@ -62,14 +65,17 @@ class GenericSourceEngine(
 
     override val api: String = config.api
 
+    private val staticHeaders = config.headers.toMap()
+    private val headerPolicy = SourceHeaderPolicy(config.baseUrl, config.imageBase, config.trustedHosts)
+
     // The live base URL for this source, resolved (once per verb, before any extraction) from
     // [baseUrlProvider]. A blank/absent override keeps the signed config value.
     private var effectiveBaseUrl: String = config.baseUrl
 
     /**
      * Refresh [effectiveBaseUrl] from the live [SourceBaseUrlProvider] before a verb's request/extraction
-     * runs. A null provider or a blank stored value keeps the frozen config baseUrl. Resolves to the same
-     * string for every verb of a source, so concurrent verbs writing it is benign.
+     * runs. A null provider or a blank stored value keeps the frozen config baseUrl. This existing
+     * extraction state is not credential authority: the actual destination is checked independently.
      */
     private suspend fun resolveEffectiveBaseUrl() {
         // The Room projection is user-editable and can contain stale values from older releases.
@@ -81,18 +87,25 @@ class GenericSourceEngine(
         effectiveBaseUrl = live ?: config.baseUrl
     }
 
-    override suspend fun home(page: Int): SourceEngineResult<List<SourceListItem>> =
+    override suspend fun home(page: Int): SourceEngineResult<List<SourceListItem>> = withFailureBoundary {
         fetchList("home", page, query = "", map = ::homeFeedItemFrom)
+    }
 
-    override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> =
+    override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> = withFailureBoundary {
         fetchList("featured", page, query = "", map = ::featuredFrom)
+    }
 
-    override suspend fun search(query: String, page: Int, filters: SourceFilterSelections): SourceEngineResult<List<SourceListItem>> =
+    override suspend fun search(
+        query: String,
+        page: Int,
+        filters: SourceFilterSelections,
+    ): SourceEngineResult<List<SourceListItem>> = withFailureBoundary {
         fetchList("search", page, query = query, selections = filters, map = ::homeFeedItemFrom)
+    }
 
-    override suspend fun details(manga: SourceMangaRef): SourceEngineResult<SourceDetails> {
+    override suspend fun details(manga: SourceMangaRef): SourceEngineResult<SourceDetails> = withFailureBoundary {
         val endpoint = config.endpoints["details"]
-            ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:details"))
+            ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("endpoint:details"))
         resolveEffectiveBaseUrl()
         val base = runRequest(endpoint, vars(itemUrl = manga.url)) { resp -> detailsFrom(manga, endpoint, resp.body) }
         // Some sources serve manga metadata and chapters through two distinct endpoints.
@@ -102,8 +115,8 @@ class GenericSourceEngine(
         // `listSelector`/POST_FORM all work). If the second request fails, the whole details request
         // fails instead of returning a misleading chapter-less success.
         val chaptersEndpoint = config.endpoints["chapters"]
-        if (base !is SourceEngineResult.Success || chaptersEndpoint == null) return base
-        return when (val chapters = chaptersPaginated(chaptersEndpoint, vars(itemUrl = manga.url))) {
+        if (base !is SourceEngineResult.Success || chaptersEndpoint == null) return@withFailureBoundary base
+        when (val chapters = chaptersPaginated(chaptersEndpoint, vars(itemUrl = manga.url))) {
             is SourceEngineResult.Success -> SourceEngineResult.Success(base.value.copy(chapters = chapters.value))
             is SourceEngineResult.Failure -> chapters
         }
@@ -112,14 +125,14 @@ class GenericSourceEngine(
     override suspend fun pages(
         manga: SourceMangaRef,
         chapter: SourceChapter,
-    ): SourceEngineResult<List<SourcePage>> {
+    ): SourceEngineResult<List<SourcePage>> = withFailureBoundary {
         val endpoint = config.endpoints["pages"]
-            ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:pages"))
+            ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("endpoint:pages"))
         resolveEffectiveBaseUrl()
         val pageHeaders = requestHeaders()
         // Reuse the already-read headers for the HTTP request too — pages() opens a chapter on the hot
         // path, and a second requestHeaders() would re-read persistent storage.
-        return runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders) { resp ->
+        runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders) { resp ->
                 // Parse the (large) page body once and read both the page list and the response root off it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
                 val scopes = parsed.listScopes()
@@ -136,7 +149,9 @@ class GenericSourceEngine(
                     scopes
                 }
                 ordered.mapNotNull { scope ->
-                    image(scope, "page.image", rootScope, chosenDir)?.let { SourcePage(url = it, headers = pageHeaders) }
+                    pageDestination(scope, rootScope, chosenDir)?.let { destination ->
+                        SourcePage(url = destination.url, headers = headerPolicy.headersFor(destination, pageHeaders))
+                    }
                 }
         }
     }
@@ -215,12 +230,12 @@ class GenericSourceEngine(
         precomputedHeaders: Map<String, String>? = null,
         extract: (SourceResponse) -> T,
     ): SourceEngineResult<T> {
-        return try {
+        return withFailureBoundary {
             // Filter query pairs append AFTER template expansion (percent-encoded, ?/& aware);
             // filter headers override same-name computed headers; filter form entries append after
             // the static formBody in declaration order. All deterministic — see FilterRequestComposer.
             val url = FilterRequestComposer.appendQueryPairs(Templates.expand(endpoint.url, vars), composed.queryPairs)
-            val headers = (precomputedHeaders ?: requestHeaders()) + composed.headerEntries
+            val headers = ((precomputedHeaders ?: requestHeaders()) + composed.headerEntries).toMap()
             val method = methodOf(endpoint.method)
             val form = if (method == SourceHttpMethod.POST_FORM) {
                 endpoint.formBody.map { (key, value) -> key to Templates.expand(value, vars) } + composed.formEntries
@@ -236,32 +251,79 @@ class GenericSourceEngine(
             } else {
                 null
             }
-            val response = http.execute(
-                SourceRequest(url = url, method = method, headers = headers, formBody = form, jsonBody = jsonBody),
-            )
-            when {
-                isCloudflareChallenge(response) -> {
-                    cloudflare?.onChallenge(config.api, url)
-                    SourceEngineResult.Failure(SourceEngineError.Http(403))
-                }
-                response.status !in 200..299 -> SourceEngineResult.Failure(SourceEngineError.Http(response.status))
-                else -> SourceEngineResult.Success(extract(response))
+            when (val response = executeWithRedirects(
+                SourceRequest(url = url, method = method, formBody = form, jsonBody = jsonBody),
+                headers,
+            )) {
+                is SourceEngineResult.Failure -> response
+                is SourceEngineResult.Success -> SourceEngineResult.Success(extract(response.value))
             }
+        }
+    }
+
+    /**
+     * Public verbs include provider reads and request preparation in the typed failure contract.
+     * Individual requests reuse this boundary so their existing result-based composition is unchanged.
+     * Cancellation always escapes as the original exception.
+     */
+    private suspend fun <T> withFailureBoundary(block: suspend () -> SourceEngineResult<T>): SourceEngineResult<T> =
+        try {
+            block()
         } catch (c: CancellationException) {
             throw c
         } catch (e: UnresolvedTemplateVarException) {
             // A required URL-template value was empty; reject the broken-but-plausible request.
             SourceEngineResult.Failure(SourceEngineError.Required("var:${e.field}:${e.varName}"))
         } catch (t: Throwable) {
-            SourceEngineResult.Failure(classifyTransportError(t))
+            SourceEngineResult.Failure(classifyError(t))
         }
+
+    /** A transport executes one hop. Neither a prior hop nor finalUrl can authorize the next one. */
+    private suspend fun executeWithRedirects(
+        request: SourceRequest,
+        headerSnapshot: Map<String, String>,
+    ): SourceEngineResult<SourceResponse> {
+        var destination = HttpDestination.parse(request.url)
+            ?: return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+        // Ktor's default bound is twenty total sends, not twenty redirects per transport call.
+        repeat(20) {
+            currentCoroutineContext().ensureActive()
+            val response = http.execute(
+                request.copy(url = destination.url, headers = headerPolicy.headersFor(destination, headerSnapshot)),
+            )
+            currentCoroutineContext().ensureActive()
+            if (isCloudflareChallenge(response)) {
+                // Preserve the challenge signal's original logical-request URL.
+                cloudflare?.onChallenge(config.api, request.url)
+                return SourceEngineResult.Failure(SourceEngineError.Http(403))
+            }
+            if (request.method != SourceHttpMethod.GET || response.status !in GET_REDIRECT_STATUSES) {
+                return if (response.status in 200..299) {
+                    SourceEngineResult.Success(response)
+                } else {
+                    SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+                }
+            }
+            // Location is a single URI reference, not a comma-separated list. Ports must expose
+            // only one unambiguous field; also reject conflicting case-variant keys in their map.
+            val locations = response.headers.filterKeys { it.equals("Location", ignoreCase = true) }.values.distinct()
+            if (locations.isEmpty()) return SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+            if (locations.size != 1) return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+            val next = destination.resolve(locations.single())
+                ?: return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+            if (destination.scheme == "https" && next.scheme == "http") {
+                return SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+            }
+            destination = next
+        }
+        return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
     }
 
     /**
-     * Bucket a non-cancellation transport/parse [Throwable] without exposing implementation details
-     * or messages across the shared contract.
+     * Bucket a non-cancellation provider/preparation, transport or parse [Throwable] without exposing
+     * implementation details or messages across the shared contract.
      */
-    private fun classifyTransportError(t: Throwable): SourceEngineError {
+    private fun classifyError(t: Throwable): SourceEngineError {
         val raw = (t.message ?: "").lowercase()
         val causeName = t.cause?.let { it::class.simpleName.orEmpty() }.orEmpty()
         return when {
@@ -281,10 +343,11 @@ class GenericSourceEngine(
     /**
      * Static config headers, plus the per-api captured headers ONLY when [SourceConfig.usesCapturedHeaders]
      * is set. A header-free source (e.g. Azora) skips the header-store read entirely — no needless I/O
-     * or log noise on every fetch.
+     * or log noise on every fetch. Copy caller-owned inputs so a suspended request/redirect chain
+     * and its page results retain one snapshot, even if storage changes before the response arrives.
      */
     private suspend fun requestHeaders(): Map<String, String> =
-        if (config.usesCapturedHeaders) config.headers + headerStore.headersFor(config.api) else config.headers
+        if (config.usesCapturedHeaders) staticHeaders + headerStore.headersFor(config.api).toMap() else staticHeaders.toMap()
 
     private fun methodOf(method: String): SourceHttpMethod = when (method.lowercase()) {
         "post-form", "post_form", "postform" -> SourceHttpMethod.POST_FORM
@@ -407,8 +470,8 @@ class GenericSourceEngine(
      * and concatenate, deciding "is there more?" from [EndpointSpec.lastPageLocator] (a numeric pagination
      * widget → loop while page < max; or a `true`/`false` has-next flag). Mirrors the legacy multi-page
      * chapter loops (Team X HTML pagination, Tapas JSON `has_next`). With no `pageParam` it is a single
-     * fetch (the original separated-details behavior). A page-1 failure fails the whole call (→ details
-     * fails → fallback); a later-page failure stops with what was gathered.
+     * fetch (the original separated-details behavior). A failure on any required page fails the whole
+     * details call rather than returning the chapters gathered so far as a complete result.
      */
     private suspend fun chaptersPaginated(endpoint: EndpointSpec, baseVars: Map<String, String>): SourceEngineResult<List<SourceChapter>> {
         if (endpoint.pageParam.isEmpty()) {
@@ -426,7 +489,7 @@ class GenericSourceEngine(
                 chaptersFrom(parsed) to paginationState(parsed, endpoint, page)
             }
             when (res) {
-                is SourceEngineResult.Failure -> return if (page == 1) res else SourceEngineResult.Success(all)
+                is SourceEngineResult.Failure -> return res
                 is SourceEngineResult.Success -> {
                     val (chs, state) = res.value
                     if (chs.isEmpty() && page > 1) break
@@ -551,7 +614,7 @@ class GenericSourceEngine(
 
     /**
      * A required template var resolved to nothing. Thrown from [fieldVars] when a URL field's template
-     * references a var whose response locator is empty; caught in [runRequest] and mapped to
+     * references a var whose response locator is empty; caught in [withFailureBoundary] and mapped to
      * [SourceEngineError.Required] so the verb fails rather than emitting a plausible-but-wrong
      * URL. Carries no `cause` — it is a deliberate fail-closed signal, not a transport failure.
      */
@@ -592,6 +655,19 @@ class GenericSourceEngine(
         return absolutize(value, config.imageBase.ifEmpty { effectiveBaseUrl })
     }
 
+    /** Keep safe public images without source headers; omit unsafe references rather than repair them. */
+    private fun pageDestination(scope: ItemScope, rootScope: ItemScope, chosenDir: String): HttpDestination? {
+        val spec = config.fields["page.image"] ?: return null
+        val value = resolveField(scope, "page.image", spec, rootScope, chosenDir, strict = true)
+        if (value.isEmpty() || !HttpDestination.isSafeImageReference(value)) return null
+        val url = if (value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)) {
+            value
+        } else {
+            absolutize(value, config.imageBase.ifEmpty { effectiveBaseUrl })
+        }
+        return HttpDestination.parse(url)
+    }
+
     private fun ratingInt(value: String): Int? =
         value.toIntOrNull() ?: value.toDoubleOrNull()?.toInt()
 
@@ -621,4 +697,8 @@ class GenericSourceEngine(
         "chapterUrl" to chapterUrl,
         "id" to itemUrl.trimEnd('/').substringAfterLast('/'),
     )
+
+    private companion object {
+        val GET_REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
+    }
 }

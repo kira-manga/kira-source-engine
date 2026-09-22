@@ -3,6 +3,7 @@ package me.manga.kira.source.engine.internal
 import com.fleeksoft.ksoup.Ksoup
 import com.fleeksoft.ksoup.nodes.Document
 import com.fleeksoft.ksoup.nodes.Element
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -103,6 +104,17 @@ internal object Extractor {
         else -> endpoint.listSelector.isNotEmpty()
     }
 
+    /** Parse with the executor's actual CSS implementation; never evaluate against provider content. */
+    fun isSupportedSelector(selector: String): Boolean = try {
+        Ksoup.parse("").select(selector)
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Exception) {
+        // Parser messages can contain the complete submitted selector; validation must not echo it.
+        false
+    }
+
     /** Item scopes for a list endpoint (home/popular/search) or a page-image list. */
     fun listScopes(body: String, baseUrl: String, endpoint: EndpointSpec): List<ItemScope> =
         parse(body, baseUrl, endpoint).listScopes()
@@ -156,7 +168,7 @@ internal object Extractor {
     private fun jsonScopes(doc: JsonElement, rootPath: String): List<ItemScope> {
         // The root may be a COMMA-separated list of candidate paths; the first whose array is non-empty
         // wins (coalesce) — e.g. DilarV2 page images live in `webp_pages` when present, else `pages`.
-        val candidates = rootPath.split(',').map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(rootPath) }
+        val candidates = coalescedPaths(rootPath)
         for (candidate in candidates) {
             val scopes = JsonPath.resolve(doc, candidate)
                 .flatMap { if (it is JsonArray) it.toList() else listOf(it) }
@@ -165,6 +177,10 @@ internal object Extractor {
         }
         return emptyList()
     }
+
+    /** The same candidate spelling is used by extraction and declaration validation. */
+    fun coalescedPaths(rootPath: String): List<String> =
+        rootPath.split(',').map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(rootPath) }
 
     /**
      * One response body parsed a single time. Whichever backing the [endpoint] format implies (an HTML

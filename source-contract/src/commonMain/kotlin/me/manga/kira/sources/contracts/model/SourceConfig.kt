@@ -56,7 +56,7 @@ data class SourceConfig(
     val engine: String = "legacy",
     /** Declared minimum app version. Reserved for a Stage-1 version gate; NOT enforced by the engine yet. */
     val minAppVersion: String? = null,
-    /** Static headers merged under any per-source captured headers (referer/UA/etc.). */
+    /** Static headers merged under captured headers; the whole source map is destination-confined. */
     val headers: Map<String, String> = emptyMap(),
     /**
      * Whether the engine reads the per-api captured-header store (cookies/UA/Cloudflare clearance)
@@ -106,6 +106,12 @@ data class SourceConfig(
      * Extra bare hosts trusted for this api in the push deep-link gate beyond
      * baseUrl/imageBase/[previousHosts] (e.g. an image CDN on an unrelated domain) (R7).
      * Trust-only — never drives migration.
+     *
+     * Also authorizes source-derived request/page headers for that exact host on HTTPS port 443
+     * only. Credential matching uses conservative ASCII DNS/IP spelling, not deep-link suffix or
+     * history rules; no implicit subdomains, alternate ports, Unicode/trailing-dot aliases or HTTP.
+     * Other credential origins come only from signed [baseUrl]/[imageBase] (an HTTP image origin
+     * requires an HTTP base). User-selected mirrors and historical hosts add no credential trust.
      */
     val trustedHosts: List<String> = emptyList(),
     /**

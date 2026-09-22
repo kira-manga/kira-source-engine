@@ -5,6 +5,12 @@ import kotlinx.datetime.LocalDate
 /**
  * Network boundary used by the shared engine. Implementations are supplied by the app and backend;
  * the engine itself never depends on a concrete HTTP client.
+ *
+ * Each [execute] sends to exactly one HTTP destination/hop. Implementations MUST NOT automatically
+ * follow redirects, replay a request to another destination, or reattach stored source headers that
+ * the engine withheld. Ordinary same-target connection retries are allowed. The engine alone owns
+ * bounded GET redirects and header selection before each hop; POST bodies must not be redirected.
+ * An adapter that silently follows redirects violates this contract even if it reports finalUrl.
  */
 fun interface SourceTransport {
     suspend fun execute(request: SourceRequest): SourceResponse
@@ -27,7 +33,9 @@ data class SourceRequest(
 data class SourceResponse(
     val status: Int,
     val body: String,
+    /** Expose Location only for a single unambiguous field value; never comma-join duplicate values. */
     val headers: Map<String, String> = emptyMap(),
+    /** Observational metadata only: never permission to send headers or proof of a safe redirect. */
     val finalUrl: String? = null,
 )
 
@@ -126,5 +134,6 @@ data class SourceChapter(
 
 data class SourcePage(
     val url: String,
+    /** Selected for this exact URL. A downstream fetcher must independently confine any redirects. */
     val headers: Map<String, String> = emptyMap(),
 )
