@@ -18,8 +18,10 @@ concurrency:
 jobs:
   verify:
     name: verify
-    runs-on: macos-15
-    timeout-minutes: 30
+    # Same hosted label as the qualified source-bootstrap check; admission below
+    # requires actual Darwin/ARM64, never an Intel fallback or SDK alias/install.
+    runs-on: macos-latest
+    timeout-minutes: 55
     outputs:
       candidate: ${{ steps.eligibility.outputs.candidate }}
       version: ${{ steps.eligibility.outputs.version }}
@@ -41,17 +43,30 @@ jobs:
         id: runtime
         shell: bash
         run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir -m 700 "$root"
-          # Record ownership immediately, including a later preparation failure.
-          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          {
-            printf 'KIRA_CI_ROOT=%s\n' "$root"
-            printf 'GRADLE_USER_HOME=%s\n' "$root/gradle"
-            printf 'KONAN_DATA_DIR=%s\n' "$root/konan"
-          } >> "$GITHUB_ENV"
-          mkdir "$root/gradle" "$root/konan" "$root/tmp" "$root/diagnostics"
+          python3 -B - <<'PY'
+          import json, os, pathlib, platform, re
+          os.umask(0o077)
+          assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
+          assert os.environ['RUNNER_OS'] == 'macOS' and os.environ['RUNNER_ARCH'] == 'ARM64'
+          assert re.fullmatch(r'[1-9][0-9]*', os.environ['GITHUB_RUN_ID'])
+          assert re.fullmatch(r'[1-9][0-9]*', os.environ['GITHUB_RUN_ATTEMPT'])
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          assert temp.is_dir() and re.fullmatch(r'/[A-Za-z0-9._/-]+', str(temp))
+          root = temp / ('kira-ci-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          root.mkdir(mode=0o700)
+          # Record exclusive creation before any later preparation can fail.
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('root=' + str(root) + '\n')
+          owner = dict(repository=os.environ['GITHUB_REPOSITORY'], run_id=os.environ['GITHUB_RUN_ID'],
+                       run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha=os.environ['GITHUB_SHA'], root=str(root))
+          with (root / 'owner.json').open('x') as f:
+              json.dump(owner, f, sort_keys=True)
+          for name in ('gradle', 'tmp', 'diagnostics'):
+              (root / name).mkdir(mode=0o700)
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'KIRA_CI_ROOT={root}\nGRADLE_USER_HOME={root}/gradle\nTMPDIR={root}/tmp\n')
+          # No KONAN_DATA_DIR/native.home/GRADLE_OPTS before strict preflight.
+          PY
 
       - name: Set up Java
         id: java
@@ -60,11 +75,12 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Bind committed inputs and decide candidate eligibility
-        id: eligibility
-        run: python3 -B .github/scripts/publication_policy.py ci-start --state "$KIRA_CI_ROOT/before.json"
+      - name: Admit fresh committed source and the exact owned source-bootstrap inputs
+        id: bootstrap_admission
+        run: python3 -B .github/scripts/publication_policy.py ci-bootstrap
 
       - name: Test bounded policy comparisons (not provenance)
+        timeout-minutes: 2
         env:
           TMPDIR: ${{ env.KIRA_CI_ROOT }}/tmp
         run: python3 -B -m unittest discover -s .github/scripts -p 'test_publication_policy.py' -v
@@ -72,9 +88,24 @@ jobs:
       - name: Require existing SDK37 metadata and android.jar (37 or 37.0 layout)
         run: python3 -B .github/scripts/publication_policy.py sdk37
 
+      - name: Prepare authenticated source-built libffi and private Kotlin 2.2.21
+        id: bootstrap
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'started=true\n' >> "$GITHUB_OUTPUT"
+          python3 -B scripts/release/prepare-libffi-source.py prepare \
+            2>&1 | tee "$KIRA_CI_ROOT/diagnostics/bootstrap.log"
+
+      - name: Verify the private native profile and bind candidate eligibility
+        id: eligibility
+        run: python3 -B .github/scripts/publication_policy.py ci-start --state "$KIRA_CI_ROOT/before.json"
+
       # One producer workspace/invocation. No Maven-local, mode or version override here.
       - name: Check all targets and, only if eligible, produce all native descriptors
         id: build
+        timeout-minutes: 20
         shell: bash
         env:
           ELIGIBLE: ${{ steps.eligibility.outputs.candidate }}
@@ -98,6 +129,7 @@ jobs:
 
       - name: Stop only this job's owned Gradle workers after production
         if: ${{ always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
@@ -118,6 +150,7 @@ jobs:
       # this is not the separate no-regeneration promotion and does not rerun check.
       - name: Export existing candidate production bytes offline
         id: export
+        timeout-minutes: 5
         if: ${{ steps.eligibility.outputs.candidate == 'true' }}
         shell: bash
         run: |
@@ -131,6 +164,7 @@ jobs:
 
       - name: Stop only this job's owned Gradle workers after export
         if: ${{ always() && (steps.export.outcome == 'success' || steps.export.outcome == 'failure') }}
+        timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
@@ -143,7 +177,8 @@ jobs:
           [[ ! -d "$GRADLE_USER_HOME/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; exit 1; }
           echo 'No installed owned Gradle runtime; no stop/bootstrap needed.'
 
-      - name: Compare all committed inputs after checks/export
+      - name: Compare committed inputs and verify native isolation even after failed production
+        if: ${{ always() && steps.eligibility.outcome == 'success' }}
         run: python3 -B .github/scripts/publication_policy.py ci-check --state "$KIRA_CI_ROOT/before.json"
 
       - name: Validate complete sealed bundle and archive it once
@@ -200,10 +235,13 @@ jobs:
       - name: Always stop owned workers and preserve diagnostics before cleanup
         id: diagnostics
         if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 5
         shell: bash
         env:
           OWNED_ROOT: ${{ steps.runtime.outputs.root }}
           JAVA_OUTCOME: ${{ steps.java.outcome }}
+          BOOTSTRAP_STARTED: ${{ steps.bootstrap.outputs.started }}
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome }}
           ADMISSION_OUTCOME: ${{ steps.eligibility.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
           EXPORT_OUTCOME: ${{ steps.export.outcome }}
@@ -211,19 +249,23 @@ jobs:
         run: |
           set -euo pipefail
           root="$OWNED_ROOT"
-          [[ "$root" == "$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && -d "$root" && ! -L "$root" ]]
+          temp="$(cd "$RUNNER_TEMP" && pwd -P)"
+          [[ "$root" == "$temp/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && -d "$root" && ! -L "$root" ]]
           [[ ! -L "$root/diagnostics" ]]
           mkdir -p "$root/diagnostics"
           printf 'ready=true\n' >> "$GITHUB_OUTPUT"
-          printf 'java=%s\nadmission=%s\nbuild=%s\nexport=%s\narchive_upload=%s\n' \
-            "$JAVA_OUTCOME" "$ADMISSION_OUTCOME" "$BUILD_OUTCOME" "$EXPORT_OUTCOME" "$UPLOAD_OUTCOME" \
+          printf 'java=%s\nbootstrap=%s\nadmission=%s\nbuild=%s\nexport=%s\narchive_upload=%s\n' \
+            "$JAVA_OUTCOME" "$BOOTSTRAP_OUTCOME" "$ADMISSION_OUTCOME" "$BUILD_OUTCOME" "$EXPORT_OUTCOME" "$UPLOAD_OUTCOME" \
             > "$root/diagnostics/phase-outcomes.txt"
           status=0
           stop_owned_gradle() {
             [[ ! -L "$root/gradle" ]] || { echo '::error::Refusing redirected Gradle home'; return 1; }
             for gradle in "$root"/gradle/wrapper/dists/gradle-9.6.1-bin/*/gradle-9.6.1/bin/gradle; do
               [[ -f "$gradle" && -x "$gradle" && ! -L "$gradle" ]] || continue
-              GRADLE_USER_HOME="$root/gradle" "$gradle" --offline --no-daemon --stop
+              GRADLE_USER_HOME="$root/gradle" python3 -B - "$gradle" <<'PY'
+          import subprocess, sys
+          subprocess.run([sys.argv[1], '--offline', '--no-daemon', '--stop'], check=True, timeout=60)
+          PY
               return
             done
             [[ ! -d "$root/gradle/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; return 1; }
@@ -233,6 +275,40 @@ jobs:
             if ! stop_owned_gradle 2>&1 | tee "$root/diagnostics/final-stop.log"; then status=1; fi
           else
             echo 'Java setup did not complete; no Gradle invocation attempted.' | tee "$root/diagnostics/final-stop.log"
+          fi
+          # Dispose the helper's own marked tree before diagnostic upload, including
+          # failed/cancelled prepare or production. Never delete a preflight-rejected
+          # pre-existing tree, and never execute a changed helper during cleanup.
+          if [[ "$BOOTSTRAP_STARTED" == true && "$status" == 0 ]]; then
+            if ! python3 -B - <<'PY' 2>&1 | tee "$root/diagnostics/bootstrap-cleanup.log"
+          import hashlib, json, os, pathlib, stat, subprocess, sys
+          repo = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          script = repo / 'scripts/release/prepare-libffi-source.py'
+          assert not any(p.is_symlink() for p in (script, *script.parents))
+          assert hashlib.sha256(script.read_bytes()).hexdigest() == '644e5b089610ab56e1dd0cc7ec41e69c874f5fee07caa39789b75172ab597e12'
+          subprocess.run([sys.executable, '-B', str(script), 'cleanup'], check=True, timeout=120)
+          owned = temp / 'kira-libffi-source'
+          assert not owned.exists() and not owned.is_symlink()
+          receipt = temp / 'kira-libffi-provenance.json'
+          if receipt.exists() or receipt.is_symlink():
+              info = receipt.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 131072
+              data = receipt.read_bytes()
+              value = json.loads(data)
+              assert value['owner'] == dict(schema_version=1, root=str(owned), repository=os.environ['GITHUB_REPOSITORY'],
+                                            run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+              assert value['cleanup'] == 'complete'
+              target = pathlib.Path(os.environ['OWNED_ROOT']) / 'diagnostics/libffi-provenance.json'
+              with target.open('xb') as f:
+                  f.write(data)
+              assert target.read_bytes() == data
+              receipt.unlink()  # Exact owned small receipt now retained in diagnostics.
+          print('Owned source-bootstrap tree absent; available source provenance preserved.')
+          PY
+            then status=1; fi
+          elif [[ "$BOOTSTRAP_STARTED" == true ]]; then
+            echo '::error::Bootstrap cleanup deferred: owned Gradle shutdown failed; not reported clean.'
           fi
           for receipt in before.json upload-receipt.json; do
             if [[ -f "$root/$receipt" && ! -L "$root/$receipt" ]]; then
@@ -278,6 +354,7 @@ jobs:
 
       - name: Always clean only this job's admitted outputs and owned runtime
         if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 3
         shell: bash
         env:
           OWNED_ROOT: ${{ steps.runtime.outputs.root }}
@@ -287,10 +364,11 @@ jobs:
         run: |
           set -euo pipefail
           root="$OWNED_ROOT"
-          [[ "$root" == "$RUNNER_TEMP/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && ! -L "$root" ]]
+          temp="$(cd "$RUNNER_TEMP" && pwd -P)"
+          [[ "$root" == "$temp/kira-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" && ! -L "$root" ]]
           note() { printf '%s\n' "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
-          if [[ "$PRESERVE_OUTCOME" != success || "$EVIDENCE_OUTCOME" != success ]]; then
-            note '::error::Cleanup deferred: owned stop/evidence capture/upload failed; outputs and runtime retained, not reported clean.'
+          if [[ "$PRESERVE_OUTCOME" != success ]]; then
+            note '::error::Cleanup deferred: owned stop/evidence capture failed; remaining outputs/runtime retained, not reported clean.'
             exit 1
           fi
           status=0
@@ -313,8 +391,19 @@ jobs:
           else
             note 'Generated-root cleanup skipped: fresh source admission did not succeed; no ownership assumed.'
           fi
+          if [[ "$EVIDENCE_OUTCOME" != success ]]; then
+            # Do not retain multi-GiB homes just because artifact upload failed.
+            # Keep bounded captured evidence/receipts, never claim full cleanup.
+            for name in gradle tmp; do
+              [[ ! -L "$root/$name" ]] || { note '::error::Redirected owned runtime child'; exit 1; }
+              rm -rf -- "$root/$name"
+              [[ ! -e "$root/$name" && ! -L "$root/$name" ]]
+            done
+            note '::error::Diagnostic upload failed: owned homes removed; captured evidence retained locally, not reported uploaded or fully clean.'
+            exit 1
+          fi
           if rm -rf -- "$root" && [[ ! -e "$root" && ! -L "$root" ]]; then
-            note 'Owned Gradle/Konan/tmp, captured archive/receipts and runtime root absent after cleanup.'
+            note 'Owned Gradle/tmp, captured archive/receipts and runtime root absent after cleanup; helper disposal was separately verified.'
           else
             note '::error::Owned runtime cleanup failed.'; status=1
           fi

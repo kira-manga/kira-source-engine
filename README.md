@@ -222,6 +222,17 @@ For an eventually owner-approved canonical commit, the recipe is deliberately li
    and action outputs are retained outside the sealed tar, including the run step summary;
    the tar is never rewritten to contain its own receipt.
 
+The macOS producer now admits the reviewed Kotlin 2.2.21 authenticated-source libffi
+bootstrap on an **actual Darwin ARM64** host. `ci-bootstrap` first checks fresh committed
+inputs, all five reviewed helper hashes and the exact run-owned private runtime, with no
+ambient native overrides. After prepare, `ci-start`, `ci-check` and both `pack` boundaries
+admit only the exact derived native-home/cache-off `GRADLE_OPTS` and re-run the helper's
+local profile/isolation verification. Stable provenance is included in before/after equality;
+only the helper's increasing verification counter is excluded. General environment and Linux
+intake guards remain unchanged. Owned helper cleanup preserves its provenance in diagnostics,
+including failed production. This adds no SDK install/alias, prebuilt checksum waiver, cache
+restore, release authority or remote writer; hosted canonical production is still a separate gate.
+
 A separate lightweight `attest` job is conditioned on successful eligible production and the
 same exact trusted source/workflow/ref. It downloads **only the producer's artifact ID**,
 rechecks the independently retained raw/manifest/seal digests and committed inputs, and uses
