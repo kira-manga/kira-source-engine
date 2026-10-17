@@ -30,6 +30,9 @@ import me.manga.kira.source.contracts.model.TransformSpec
 import me.manga.kira.source.engine.internal.ComposedFilters
 import me.manga.kira.source.engine.internal.DateStrategies
 import me.manga.kira.source.engine.internal.Extractor
+import me.manga.kira.source.engine.internal.DilarChapterProtocol
+import me.manga.kira.source.contracts.SourceSensitiveTransport
+import me.manga.kira.source.contracts.SourceSessionCryptography
 import me.manga.kira.source.engine.internal.FilterRequestComposer
 import me.manga.kira.source.engine.internal.HttpDestination
 import me.manga.kira.source.engine.internal.ItemScope
@@ -43,7 +46,8 @@ import me.manga.kira.source.engine.internal.UrlEncode
  * The one generic source implementation. It satisfies [SourceEngine] for ANY source whose
  * behavior can be described by a [SourceConfig] — by interpreting that config (HTTP request templates
  * + named extraction/transform/date strategies) against an injected [SourceTransport], then mapping the
- * extracted strings onto neutral contract models. It contains no source-specific code and no HTTP library.
+ * extracted strings onto neutral contract models. Special protocols are explicitly named compiled
+ * capabilities with host-supplied primitive ports; there is no HTTP library or legacy fallback.
  *
  * The generic path is the only executable source path. A failure is returned to the caller; no
  * legacy adapter is inferred. Golden-fixture tests remain the engine's behavioural specification.
@@ -61,6 +65,8 @@ class GenericSourceEngine(
     private val headerStore: SourceHeaderProvider,
     private val cloudflare: SourceChallengeListener? = null,
     private val baseUrlProvider: SourceBaseUrlProvider? = null,
+    private val sensitiveHttp: SourceSensitiveTransport? = null,
+    private val sessionCryptography: SourceSessionCryptography? = null,
 ) : SourceEngine {
 
     override val api: String = config.api
@@ -137,7 +143,7 @@ class GenericSourceEngine(
         val pageHeaders = requestHeaders()
         // Reuse the already-read headers for the HTTP request too — pages() opens a chapter on the hot
         // path, and a second requestHeaders() would re-read persistent storage.
-        runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders) { resp ->
+        runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders, encryptedReader = true) { resp ->
                 // Parse the (large) page body once and read both the page list and the response root off it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
                 val scopes = parsed.listScopes()
@@ -172,6 +178,7 @@ class GenericSourceEngine(
     ): SourceEngineResult<List<T>> {
         val endpoint = config.endpoints[verb]
             ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:$verb"))
+        if (endpoint.singlePage && page != config.pagination.start) return SourceEngineResult.Success(emptyList())
         resolveEffectiveBaseUrl()
         // Declarative filter → request mapping (CONFIG_DRIVEN_FILTERS_PLAN.md §3). Defaults apply
         // even to an empty selection; a source with no declared filters composes to EMPTY.
@@ -233,6 +240,7 @@ class GenericSourceEngine(
         vars: Map<String, String>,
         composed: ComposedFilters = ComposedFilters.EMPTY,
         precomputedHeaders: Map<String, String>? = null,
+        encryptedReader: Boolean = false,
         extract: (SourceResponse) -> T,
     ): SourceEngineResult<T> {
         return withFailureBoundary {
@@ -264,10 +272,22 @@ class GenericSourceEngine(
             } else {
                 null
             }
-            when (val response = executeWithRedirects(
-                SourceRequest(url = url, method = method, formBody = form, jsonBody = jsonBody),
-                headers,
-            )) {
+            val response = if (endpoint.format == DilarChapterProtocol.FORMAT) {
+                if (!encryptedReader || method != SourceHttpMethod.GET || config.usesCapturedHeaders || headers.isNotEmpty()) {
+                    return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+                }
+                val privateTransport = sensitiveHttp
+                    ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("capability:sensitive-transport"))
+                val cryptography = sessionCryptography
+                    ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("capability:session-cryptography"))
+                DilarChapterProtocol(cryptography, privateTransport).read(url, vars["id"].orEmpty())
+            } else {
+                executeWithRedirects(
+                    SourceRequest(url = url, method = method, formBody = form, jsonBody = jsonBody),
+                    headers,
+                )
+            }
+            when (response) {
                 is SourceEngineResult.Failure -> response
                 is SourceEngineResult.Success -> SourceEngineResult.Success(extract(response.value))
             }
@@ -446,11 +466,7 @@ class GenericSourceEngine(
         val root = parsed.rootScope()
         val chapterLocator = config.fields["detail.chapters"]
         val chapters = if (chapterLocator != null) {
-            parsed.subScopes(chapterLocator)
-                .filterNot { isLockedChapter(it, root) }
-                .map { chapterFrom(it, root) }
-                .filter { isNavigable(it.chapter.url) }
-                .orderedChapters()
+            chapterCollectionFrom(parsed.subScopes(chapterLocator), root).orderedChapters()
         } else {
             emptyList()
         }
@@ -475,11 +491,17 @@ class GenericSourceEngine(
      * is mapped through the same `chapter.*` fields + locked-filter as the inline path.
      */
     private fun chaptersFrom(parsed: Extractor.ParsedBody): List<ExtractedChapter> {
-        val root = parsed.rootScope()
-        return parsed.listScopes()
-            .filterNot { isLockedChapter(it, root) }
-            .map { chapterFrom(it, root) }
-            .filter { isNavigable(it.chapter.url) }
+        return chapterCollectionFrom(parsed.listScopes(), parsed.rootScope())
+    }
+
+    /** Optional grouped releases: keep every child identity and its own containing group's context. */
+    private fun chapterCollectionFrom(scopes: List<ItemScope>, outer: ItemScope): List<ExtractedChapter> {
+        fun extract(children: List<ItemScope>, root: ItemScope): List<ExtractedChapter> =
+            children.filterNot { isLockedChapter(it, root) }
+                .map { chapterFrom(it, root) }
+                .filter { isNavigable(it.chapter.url) }
+        val entries = config.fields["chapter.entries"] ?: return extract(scopes, outer)
+        return scopes.flatMap { group -> extract(group.children(entries), group) }
     }
 
     /**
@@ -512,13 +534,19 @@ class GenericSourceEngine(
             val res = runRequest(endpoint, pageVars) { resp ->
                 // Parse each chapters page once; the chapter list and the pagination locator both read it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
-                chaptersFrom(parsed) to paginationState(parsed, endpoint, page)
+                val groups = parsed.listScopes()
+                val chapters = chapterCollectionFrom(groups, parsed.rootScope())
+                // A nonempty grouped page may contain only empty/locked release collections.
+                // That does not terminate an explicitly continuing feed. Keep the existing true
+                // empty-page sentinel, and the unchanged mapped-empty behavior for flat sources.
+                val terminalEmpty = if ("chapter.entries" in config.fields) groups.isEmpty() else chapters.isEmpty()
+                Triple(chapters, paginationState(parsed, endpoint, page), terminalEmpty)
             }
             when (res) {
                 is SourceEngineResult.Failure -> return res
                 is SourceEngineResult.Success -> {
-                    val (chs, state) = res.value
-                    if (chs.isEmpty() && page > 1) break
+                    val (chs, state, terminalEmpty) = res.value
+                    if (terminalEmpty && page > 1) break
                     all += chs
                     state.maxPage?.let { maxPage = it }
                     if (!state.hasNext) break

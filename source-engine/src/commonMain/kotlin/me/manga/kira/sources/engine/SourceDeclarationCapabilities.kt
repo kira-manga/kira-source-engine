@@ -189,6 +189,8 @@ class SourceDeclarationCapabilities(
         }
 
         private fun chapterFields(html: Boolean) {
+            // Optional nested entries are consumed once per chapter group, not ignored metadata.
+            field("chapter.entries", html, FieldMode.LIST)
             for (name in listOf("number", "name", "url", "locked", "order")) field("chapter.$name", html, rootAvailable = true)
             field("chapter.date", html, FieldMode.DATE)
         }

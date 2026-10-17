@@ -100,7 +100,7 @@ internal object Extractor {
         "html" -> true
         // script-json is JSON-after-extraction: the response is HTML, but the data lives in a <script>
         // JSON island (e.g. Next.js __NEXT_DATA__), so it is parsed as JSON, not scraped via CSS.
-        "json", "script-json" -> false
+        "json", "script-json", "dilar-ecies-v16" -> false
         else -> endpoint.listSelector.isNotEmpty()
     }
 

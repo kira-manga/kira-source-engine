@@ -169,7 +169,11 @@ data class PaginationSpec(
 data class EndpointSpec(
     val url: String,
     val method: String = "get",
-    /** `"json"` | `"html"` | `"script-json"` | `""` (infer: html iff [listSelector] is set, else json). */
+    /**
+     * `"json"` | `"html"` | `"script-json"` | `""` (infer: html iff [listSelector] is set, else json).
+     * `"dilar-ecies-v16"` is a pages-only compiled protocol, requiring explicit private transport
+     * and crypto ports. It returns normalized `pages[{url,order}]`; older validators reject it.
+     */
     val format: String = "",
     /** For `format = "script-json"`: the `<script id="…">` whose JSON body is parsed (default `__NEXT_DATA__`). */
     val scriptId: String = "",
@@ -199,6 +203,11 @@ data class EndpointSpec(
      * JSON `has_next`; loop while true).
      */
     val lastPageLocator: String = "",
+    /**
+     * A finite `home`, `featured` or `search` feed: request only [PaginationSpec.start]. Other
+     * pages return an empty list without IO. False preserves existing template-driven pagination.
+     */
+    val singlePage: Boolean = false,
 )
 
 /**
@@ -223,6 +232,8 @@ data class FilterSpec(
  * Optional `chapter.order` supplies a finite numeric newest-first sort key. Ordering is stable for
  * ties and applies across the full fetched chapter list; absent preserves provider order. Malformed
  * required sort keys fail the operation rather than silently becoming zero. Chapter URLs stay IDs.
+ * Optional `chapter.entries` locates releases inside each inline/dedicated chapter group. Every
+ * release is mapped; `root:` vars then refer to its containing group, never a first-release shortcut.
  */
 @Serializable
 data class FieldSpec(

@@ -207,6 +207,9 @@ class DefaultSourceConfigValidator(
         errors: MutableList<String>,
     ) {
         for ((verb, spec) in source.endpoints) {
+            if (spec.singlePage && verb !in setOf("home", "featured", "search")) {
+                errors += "$tag endpoint '$verb' singlePage is only supported for list feeds"
+            }
             if (spec.url.isBlank()) errors += "$tag endpoint '$verb' has a blank url"
             // The raw {query} var is the UNENCODED search term — legitimate only in formBody
             // values (the executor form-encodes those). In a URL it must be {queryEncoded} and in
@@ -226,6 +229,15 @@ class DefaultSourceConfigValidator(
             }
             if (spec.format.isNotEmpty() && spec.format !in SUPPORTED_FORMATS) {
                 errors += "$tag endpoint '$verb' has unknown format '${spec.format}'"
+            }
+            if (spec.format == "dilar-ecies-v16" && (
+                    verb != "pages" || spec.method.lowercase() !in setOf("", "get") ||
+                        spec.url != "{baseUrl}/api/chapters/{chapterId}" || source.baseUrl != "https://dilar.tube" ||
+                        source.usesCapturedHeaders || source.headers.isNotEmpty() ||
+                        spec.formBody.isNotEmpty() || spec.jsonBody.isNotEmpty()
+                )
+            ) {
+                errors += "$tag encrypted reader requires its compiled HTTPS endpoint and private header-free transport"
             }
             for (filter in spec.listFilters) {
                 if (filter.op !in SUPPORTED_FILTER_OPS) {
@@ -641,7 +653,7 @@ class DefaultSourceConfigValidator(
                 "post_json",
                 "postjson",
             )
-        private val SUPPORTED_FORMATS = setOf("json", "html", "script-json")
+        private val SUPPORTED_FORMATS = setOf("json", "html", "script-json", "dilar-ecies-v16")
         private val SUPPORTED_FILTER_OPS = setOf("equals", "notEquals", "contains", "notNull", "isNull")
         private val SUPPORTED_FILTER_MODES = setOf("include", "exclude")
 
