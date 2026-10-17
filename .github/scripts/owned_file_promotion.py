@@ -22,8 +22,8 @@ import publisher_workflow as common
 
 CONTROL_REF = "refs/heads/remediation/priority-sources-20261017"
 WORKFLOW = ".github/workflows/owned-file-promotion-check.yml"
-PRODUCER_SHA = "e614df497d0a598feb097fd6d18d67051fd3e531"
-PRODUCER_RUN = 39028369302
+PRODUCER_SHA = "901bae34291f5baf8dcf104223b27d1d5cd1d15e"
+PRODUCER_RUN = 39048582890
 FIELDS = intake.PRODUCER_FIELDS
 FLAGS = ["--no-daemon", "--no-parallel", "--max-workers=1", "--no-build-cache", "--no-configuration-cache",
          "--console=plain", "--info", "-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8",
