@@ -12,6 +12,7 @@ import publication_policy as policy
 
 
 API_HOST = "api.github.com"
+DEPRECATION_LINK = '<https://docs.github.com/en/rest/about-the-rest-api/api-versions>; rel="deprecation"; type="text/html"'
 SOCKET_TIMEOUT = 15
 READ_SECONDS = 30
 PUBLISHER_WORKFLOW = ".github/workflows/publish.yml"
@@ -56,7 +57,8 @@ def _request_json(path, token, *, bypass_branch=None):
                        "Compressed receipt refused")
         policy.require(response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
                        in ("application/json", "application/vnd.github+json"), "Non-JSON receipt refused")
-        policy.require(not response.getheader("Link"), "Paginated receipt refused")
+        link = response.getheader("Link")
+        policy.require(not link or link == DEPRECATION_LINK, "Paginated receipt refused")
         length = response.getheader("Content-Length")
         if length is not None:
             policy.require(re.fullmatch(r"[0-9]{1,8}", length) is not None

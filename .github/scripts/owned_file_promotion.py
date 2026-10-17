@@ -104,7 +104,9 @@ def acquire(job, selected, token):
     archive = common.downloaded(job, "artifact", policy.ARCHIVE, policy.MAX_BYTES)
     asset = common.private_file(job.root / policy.GH_DARWIN_ASSET)
     proof = job.root / "attestation.json"
+    print("Acquiring official attestation bundle.", flush=True)
     common.write_private(proof, receipts.acquire_attestation_bundle(selected, token=token))
+    print("Verifying native signatures and completed official receipts.", flush=True)
     connected.connected_intake(job.producer, selected, archive, asset, proof, token=token)
     source = policy.source_snapshot(job.producer, selected["source_sha"], fresh=True)
     write_json(job.root / "diagnostics/source-before.json", source)

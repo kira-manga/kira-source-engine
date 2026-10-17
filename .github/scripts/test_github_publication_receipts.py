@@ -137,6 +137,18 @@ class ReceiptAcquisitionTests(unittest.TestCase):
                 r.acquire_official_receipts(expected(), token)
         self.factory.assert_not_called()
 
+    def test_fixed_deprecation_metadata_is_not_pagination(self):
+        self.responses = [Response(receipts()[k], headers={"Link": r.DEPRECATION_LINK})
+                          for k in ("attempt", "jobs", "artifact", "current")]
+        self.assertEqual(r.acquire_official_receipts(expected()), receipts())
+        prefix = "/repos/kira-manga/kira-source-engine/actions/"
+        self.assertEqual([a for a, _ in self.requests], [
+            ("GET", prefix + "runs/31/attempts/2"),
+            ("GET", prefix + "runs/31/attempts/2/jobs?per_page=100&page=1"),
+            ("GET", prefix + "artifacts/42"), ("GET", prefix + "runs/31")])
+        self.assertEqual(len(self.connections), 4)
+        self.assertClosed()
+
     def test_anonymous_is_explicit_and_proxy_environment_not_used(self):
         with mock.patch.dict("os.environ", {"HTTPS_PROXY": "https://untrusted.invalid", "GH_TOKEN": "ignored"}):
             r.acquire_official_receipts(expected())
@@ -147,6 +159,13 @@ class ReceiptAcquisitionTests(unittest.TestCase):
         cases = [(302, {"Location": "https://other.invalid/token"}), (403, {}), (429, {}),
                  (200, {"Content-Encoding": "gzip"}), (200, {"Link": '<https://other.invalid>; rel="next"'}),
                  (200, {"Content-Type": "text/html"}), (200, {"Content-Length": str(p.MAX_META + 1)})]
+        next_link = '<https://other.invalid>; rel="next"'
+        cases += [(200, {"Link": link}) for link in (
+            r.DEPRECATION_LINK + ", " + next_link,
+            next_link + ", " + r.DEPRECATION_LINK,
+            r.DEPRECATION_LINK + ", " + r.DEPRECATION_LINK,
+            r.DEPRECATION_LINK.replace("api-versions>", "api-versions/other>"),
+            r.DEPRECATION_LINK.replace('rel="deprecation"', 'rel="next"'))]
         for status, headers in cases:
             with self.subTest(status=status, headers=headers):
                 self.responses = [Response({}, headers=headers, status=status)]
