@@ -420,11 +420,11 @@ class GenericSourceEngine(
     )
 
     private fun detailsFrom(manga: SourceMangaRef, endpoint: EndpointSpec, body: String): SourceDetails {
-        val root = Extractor.rootScope(body, effectiveBaseUrl, endpoint)
-        val html = Extractor.isHtml(endpoint)
+        val parsed = Extractor.parse(body, effectiveBaseUrl, endpoint)
+        val root = parsed.rootScope()
         val chapterLocator = config.fields["detail.chapters"]
         val chapters = if (chapterLocator != null) {
-            Extractor.subScopes(body, effectiveBaseUrl, html, chapterLocator)
+            parsed.subScopes(chapterLocator)
                 .filterNot { isLockedChapter(it) }
                 .map { chapterFrom(it) }
                 .filter { isNavigable(it.url) }
@@ -496,6 +496,9 @@ class GenericSourceEngine(
                     all += chs
                     state.maxPage?.let { maxPage = it }
                     if (!state.hasNext) break
+                    // The bound limits work, not the source's chapter count. If more are required,
+                    // returning the accumulated prefix as a complete list would silently lose data.
+                    if (page == safetyCap) return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
                     page++
                 }
             }

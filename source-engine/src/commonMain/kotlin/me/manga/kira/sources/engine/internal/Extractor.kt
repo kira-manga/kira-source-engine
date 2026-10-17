@@ -155,11 +155,6 @@ internal object Extractor {
     fun locatorValues(body: String, baseUrl: String, endpoint: EndpointSpec, locator: String): List<String> =
         parse(body, baseUrl, endpoint).locatorValues(locator)
 
-    /** A sub-list within a response (e.g. the chapter list embedded in a details page). */
-    fun subScopes(body: String, baseUrl: String, html: Boolean, locator: FieldSpec): List<ItemScope> =
-        if (html) htmlScopes(Ksoup.parse(body, baseUrl), locator.listSelector.ifEmpty { locator.selector })
-        else jsonScopes(json.parseToJsonElement(body), locator.listPath.ifEmpty { locator.path })
-
     private fun htmlScopes(doc: Element, selector: String): List<ItemScope> {
         if (selector.isBlank()) return emptyList()
         return doc.select(selector).map { HtmlItemScope(it) }
@@ -197,24 +192,23 @@ internal object Extractor {
             endpoint.format == "script-json" -> json.parseToJsonElement(scriptJson(body, endpoint.scriptId))
             else -> json.parseToJsonElement(body)
         }
-        // locatorValues on a non-html endpoint historically read the RAW body as JSON. For plain `json`
-        // that is the same node as [jsonDoc]; only `script-json` differs (its [jsonDoc] is the island, not
-        // the body), so parse the raw body lazily and only when actually needed there.
-        private val rawJsonDoc: Lazy<JsonElement> =
-            if (endpoint.format == "script-json") lazy { json.parseToJsonElement(body) } else lazy { jsonDoc!! }
-
         fun listScopes(): List<ItemScope> =
             if (html) htmlScopes(htmlDoc!!, endpoint.listSelector) else jsonScopes(jsonDoc!!, endpoint.root)
 
         fun rootScope(): ItemScope =
             if (html) HtmlItemScope(htmlDoc!!) else JsonItemScope(jsonDoc!!)
 
+        /** Inline lists use the same parsed document/island as scalar fields and pagination. */
+        fun subScopes(locator: FieldSpec): List<ItemScope> =
+            if (html) htmlScopes(htmlDoc!!, locator.listSelector.ifEmpty { locator.selector })
+            else jsonScopes(jsonDoc!!, locator.listPath.ifEmpty { locator.path })
+
         fun locatorValues(locator: String): List<String> {
             if (locator.isBlank()) return emptyList()
             return if (html) {
                 htmlDoc!!.select(locator).map { it.text() }.filter { it.isNotBlank() }
             } else {
-                val doc = rawJsonDoc.value
+                val doc = jsonDoc!!
                 JsonPath.stringList(doc, locator).ifEmpty {
                     JsonPath.string(doc, locator)?.let { listOf(it) } ?: emptyList()
                 }

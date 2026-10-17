@@ -231,9 +231,9 @@ object DeclarationCapabilityFixtures {
             fields = mapOf("detail.title" to FieldSpec(path = "props.title"), "page.image" to FieldSpec(path = "url")),
         ))
         accept("script_json_single_chapter_request", source(endpoints = mapOf("chapters" to script)))
-        reject("script_json_inline_chapters_unsupported", source(
+        accept("script_json_inline_chapters", source(
             endpoints = mapOf("details" to script), fields = mapOf("detail.chapters" to FieldSpec(listPath = "props.chapters")),
-        ), "field.script_json.inline_chapters", "fields[detail.chapters]")
+        ))
         reject("script_json_uses_json_field_grammar", source(
             endpoints = mapOf("pages" to script), fields = mapOf("page.image" to FieldSpec(path = "images[0:]")),
         ), "locator.json.unsupported", "fields[page.image].path")
@@ -279,8 +279,7 @@ object DeclarationCapabilityFixtures {
             endpoints = mapOf("chapters" to paged.copy(url = "{itemUrl}/chapters")),
             fields = mapOf("chapter.url" to FieldSpec(template = "{chapterPage}", vars = mapOf("chapterPage" to "id"))),
         ), "pagination.counter.unconsumed", "endpoints[chapters].pageParam")
-        reject("script_json_pagination_is_not_implemented", source(endpoints = mapOf("chapters" to paged.copy(format = "script-json"))),
-            "pagination.script_json.unsupported", "endpoints[chapters].lastPageLocator")
+        accept("script_json_pagination_reads_island", source(endpoints = mapOf("chapters" to paged.copy(format = "script-json"))))
         reject("unsupported_termination_locator", source(endpoints = mapOf("chapters" to paged.copy(lastPageLocator = "meta..next"))),
             "locator.json.unsupported", "endpoints[chapters].lastPageLocator")
         add(DeclarationCapabilityFixture("automatic_pagination_only_on_chapters", source(endpoints = mapOf(

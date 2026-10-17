@@ -123,9 +123,6 @@ class SourceDeclarationCapabilities(
                 if (locator.isBlank()) {
                     finding("pagination.termination.required", "$path.lastPageLocator", "A chapter counter requires a nonblank termination locator.")
                 }
-                if (endpoint.format == "script-json") {
-                    finding("pagination.script_json.unsupported", "$path.lastPageLocator", "Chapter pagination cannot read a termination locator from a script-json island.")
-                }
             }
             if (locator.isNotBlank()) rawLocator(locator, Extractor.isHtml(endpoint), "$path.lastPageLocator")
             // Locator values may be numeric, boolean, or nonempty next strings. The latter are only
@@ -146,9 +143,6 @@ class SourceDeclarationCapabilities(
                 endpoint.listFilters.forEachIndexed { index, filter ->
                     rawLocator(filter.path, html, "$path.listFilters[$index].path")
                 }
-            }
-            if (verb == "details" && endpoint.format == "script-json" && "detail.chapters" in source.fields) {
-                finding("field.script_json.inline_chapters", "fields[detail.chapters]", "Inline chapters cannot be extracted from a script-json details island.")
             }
         }
 

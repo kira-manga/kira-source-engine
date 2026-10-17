@@ -149,6 +149,32 @@ class GenericSourceClientChapterPaginationTest {
         assertEquals("DrfTitle", d.title)
         assertEquals(listOf("C1", "C2", "C3"), d.chapters.map { it.number }) // page1 (C1,C2) + page2 (C3)
     }
+
+    @Test
+    fun pagination_bound_refuses_incomplete_chapters_but_accepts_exact_terminal_page() = runTest {
+        for (moreAtBound in listOf(true, false)) {
+            val requested = mutableListOf<String>()
+            val http = SourceTransport { request ->
+                requested += request.url
+                if (request.url == jsonManga.url) {
+                    SourceResponse(200, PAGINATION_RESPONSES.getValue(jsonManga.url))
+                } else {
+                    val page = request.url.substringAfterLast("page=").toInt()
+                    assertTrue(page <= 200, "must not request beyond the safety bound")
+                    SourceResponse(200, """{"data":{"episodes":[{"id":$page,"name":"Chapter $page"}],"pagination":{"has_next":${page < 200 || moreAtBound}}}}""")
+                }
+            }
+            val result = client("pg-json", http).details(jsonManga)
+            if (moreAtBound) {
+                assertEquals(SourceEngineResult.Failure(SourceEngineError.InvalidResponse), result)
+            } else {
+                val chapters = result.valueOrFail().chapters
+                assertEquals(200, chapters.size)
+                assertEquals("Chapter 200", chapters.last().name)
+            }
+            assertEquals(listOf(jsonManga.url) + (1..200).map(::jsonPageUrl), requested)
+        }
+    }
 }
 
 private const val PAGINATION_CONFIG = """

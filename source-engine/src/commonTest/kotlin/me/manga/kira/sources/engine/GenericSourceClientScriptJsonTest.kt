@@ -3,10 +3,14 @@ package me.manga.kira.source.engine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import me.manga.kira.source.contracts.SourceEngineResult
+import me.manga.kira.source.contracts.SourceEngineError
 import me.manga.kira.source.contracts.SourceChapter
 import me.manga.kira.source.contracts.SourceMangaRef
 import me.manga.kira.source.contracts.SourceConfigParser
 import me.manga.kira.source.contracts.model.SourceConfig
+import me.manga.kira.source.contracts.model.SourceConfigDocument
+import me.manga.kira.source.contracts.model.EndpointSpec
+import me.manga.kira.source.contracts.model.FieldSpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -57,6 +61,77 @@ class GenericSourceClientScriptJsonTest {
         val manga = SourceMangaRef("sj", "en", "x", "https://sj.example.com/x", "")
         assertTrue(client.details(manga) is SourceEngineResult.Failure)
     }
+
+    @Test
+    fun inline_chapters_share_the_details_json_island_and_coalesced_path() = runTest {
+        val config = validated(source().copy(fields = source().fields + mapOf(
+            "detail.chapters" to FieldSpec(listPath = "props.pageProps.absent,props.pageProps.chapters"),
+            "chapter.name" to FieldSpec(path = "name"),
+            "chapter.url" to FieldSpec(path = "url"),
+        )))
+        val manga = SourceMangaRef("sj", "en", "x", "https://sj.example.com/x", "")
+        val body = island("""{"props":{"pageProps":{"initialManga":{"name":"My Manga"},"chapters":[
+            {"name":"Chapter 2","url":"https://sj.example.com/ch2"},
+            {"name":"Chapter 1","url":"https://sj.example.com/ch1"}
+        ]}}}""")
+        val http = FakeHttpExecutor(mapOf(manga.url to body))
+        val details = GenericSourceEngine(config, http, FakeHeaderStore()).details(manga).valueOrFail()
+        assertEquals("My Manga", details.title)
+        assertEquals(listOf("Chapter 2", "Chapter 1"), details.chapters.map { it.name })
+        assertEquals(listOf("https://sj.example.com/ch2", "https://sj.example.com/ch1"), details.chapters.map { it.url })
+        assertEquals(listOf(manga.url), http.requested)
+    }
+
+    @Test
+    fun chapter_pagination_reads_continuation_from_the_same_custom_island() = runTest {
+        val http = FakeHttpExecutor(paginatedResponses())
+        val details = GenericSourceEngine(paginatedSource(), http, FakeHeaderStore())
+            .details(paginatedManga).valueOrFail()
+        assertEquals(listOf("Chapter 1", "Chapter 2"), details.chapters.map { it.name })
+        assertEquals(listOf(paginatedManga.url, chapterPage(1), chapterPage(2)), http.requested)
+    }
+
+    @Test
+    fun malformed_required_later_island_fails_without_partial_chapters() = runTest {
+        val http = FakeHttpExecutor(paginatedResponses() + (chapterPage(2) to island("{", "chapter-data")))
+        assertEquals(
+            SourceEngineResult.Failure(SourceEngineError.InvalidResponse),
+            GenericSourceEngine(paginatedSource(), http, FakeHeaderStore()).details(paginatedManga),
+        )
+        assertEquals(listOf(paginatedManga.url, chapterPage(1), chapterPage(2)), http.requested)
+    }
+
+    private val paginatedManga = SourceMangaRef("sj", "en", "x", "https://sj.example.com/x", "")
+
+    private fun chapterPage(page: Int) = "https://sj.example.com/x/chapters?page=$page"
+
+    private fun paginatedSource(): SourceConfig = source().let { config ->
+        validated(config.copy(
+            endpoints = config.endpoints + ("chapters" to EndpointSpec(
+                url = "{itemUrl}/chapters?page={page}", format = "script-json", scriptId = "chapter-data",
+                root = "chapters", pageParam = "page", lastPageLocator = "hasNext",
+            )),
+            fields = config.fields + mapOf(
+                "chapter.name" to FieldSpec(path = "name"),
+                "chapter.url" to FieldSpec(path = "url"),
+            ),
+        ))
+    }
+
+    private fun validated(config: SourceConfig): SourceConfig {
+        val result = DefaultSourceConfigValidator(DefaultStrategyRegistry())
+            .validate(SourceConfigDocument(schemaVersion = 1, sources = listOf(config)))
+        assertTrue(result.isValid, "config invalid: ${result.errors}")
+        return config
+    }
+
+    private fun paginatedResponses(): Map<String, String> = SJ_RESPONSES + mapOf(
+        chapterPage(1) to island("""{"chapters":[{"name":"Chapter 1","url":"https://sj.example.com/ch1"}],"hasNext":true}""", "chapter-data"),
+        chapterPage(2) to island("""{"chapters":[{"name":"Chapter 2","url":"https://sj.example.com/ch2"}],"hasNext":false}""", "chapter-data"),
+    )
+
+    private fun island(json: String, id: String = "__NEXT_DATA__") =
+        """<html><body><script id="$id" type="application/json">$json</script></body></html>"""
 }
 
 private const val SJ_CONFIG = """
