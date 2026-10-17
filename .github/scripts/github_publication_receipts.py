@@ -13,6 +13,7 @@ import publication_policy as policy
 API_HOST = "api.github.com"
 SOCKET_TIMEOUT = 15
 READ_SECONDS = 30
+PUBLISHER_WORKFLOW = ".github/workflows/publish.yml"
 
 
 def _get_json(path, token):
@@ -110,6 +111,26 @@ def _environment_identity(value, name, identity):
     return value["id"], value["name"], flags["protected_branches"], flags["custom_branch_policies"]
 
 
+def _environment_observation(name, environment_id, selected, token):
+    path = "/repos/" + policy.REPOSITORY + "/environments/" + quote(name, safe="")
+    first_value = _get_json(path, token)
+    first = _environment_identity(first_value, name, environment_id)
+    response = _get_json(path + "/deployment-branch-policies?per_page=100&page=1", token)
+    policies = response.get("branch_policies")
+    policy.require(type(response.get("total_count")) is int and type(policies) is list
+                   and response["total_count"] == len(policies) == len(selected), "Incomplete policy list refused")
+    observed = _branch_policy_inventory(policies)
+    policy.require(observed == selected, "Selected policy inventory changed")
+    final_value = _get_json(path, token)
+    final = _environment_identity(final_value, name, environment_id)
+    policy.require(final == first, "Environment configuration changed")
+    projection = {"id": final[0], "name": final[1],
+                  "deployment_branch_policy": {"protected_branches": final[2], "custom_branch_policies": final[3]},
+                  "branch_policies": [{"id": identity, "name": policy_name, "type": kind}
+                                      for identity, policy_name, kind in observed]}
+    return projection, first_value, final_value
+
+
 def acquire_environment_configuration(name, environment_id, expected_policies, *, token=None):
     """Observe an independently selected environment and exact explicit branch/tag policy list.
 
@@ -125,22 +146,176 @@ def acquire_environment_configuration(name, environment_id, expected_policies, *
         policy.require(policy.positive(environment_id) and environment_id <= 2**63 - 1, "Environment ID refused")
         selected = _branch_policy_inventory(expected_policies, selected=True)
         _validate_read_token(token)
-        path = "/repos/" + policy.REPOSITORY + "/environments/" + quote(name, safe="")
-        first = _environment_identity(_get_json(path, token), name, environment_id)
-        response = _get_json(path + "/deployment-branch-policies?per_page=100&page=1", token)
-        policies = response.get("branch_policies")
-        policy.require(type(response.get("total_count")) is int and type(policies) is list
-                       and response["total_count"] == len(policies) == len(selected), "Incomplete policy list refused")
-        observed = _branch_policy_inventory(policies)
-        policy.require(observed == selected, "Selected policy inventory changed")
-        final = _environment_identity(_get_json(path, token), name, environment_id)
-        policy.require(final == first, "Environment configuration changed")
-        return {"id": final[0], "name": final[1],
-                "deployment_branch_policy": {"protected_branches": final[2], "custom_branch_policies": final[3]},
-                "branch_policies": [{"id": identity, "name": policy_name, "type": kind}
-                                    for identity, policy_name, kind in observed]}
+        return _environment_observation(name, environment_id, selected, token)[0]
     except Exception:
         raise policy.Refusal("Environment configuration observation refused") from None
+
+
+def _selected_id(value):
+    policy.require(policy.positive(value) and value <= 2**63 - 1, "Selected identity refused")
+    return value
+
+
+def _branch_name(value):
+    _configuration_name(value)
+    policy.require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value) is not None and ".." not in value
+                   and all(part and not part.startswith(".") and not part.endswith((".", ".lock"))
+                           for part in value.split("/")), "Literal branch name required")
+    return value
+
+
+def _checks(values):
+    policy.require(type(values) is list and 1 <= len(values) <= 100, "Selected checks required")
+    result = []
+    for value in values:
+        policy.require(type(value) is dict and set(value) == {"context", "app_id"}, "Check fields refused")
+        result.append({"context": _configuration_name(value["context"]), "app_id": _selected_id(value["app_id"])})
+    policy.require(len({item["context"] for item in result}) == len(result), "Duplicate check context refused")
+    return sorted(result, key=lambda item: item["context"])
+
+
+def validated_publisher_request(publisher, protection, *, token=None):
+    """Copy independently selected facts; no policy discovery or approval is performed."""
+    try:
+        fields = {"repository", "repository_id", "ref", "workflow_ref", "workflow_sha", "source_sha",
+                  "run_id", "run_attempt", "workflow_id"}
+        policy.require(type(publisher) is dict and set(publisher) == fields, "Publisher fields refused")
+        publisher = publisher.copy()
+        policy.require(publisher["repository"] == policy.REPOSITORY and type(publisher["ref"]) is str
+                       and publisher["ref"].startswith("refs/heads/"), "Publisher repository/ref refused")
+        branch = _branch_name(publisher["ref"][len("refs/heads/"):])
+        policy.require(publisher["workflow_ref"] == policy.REPOSITORY + "/" + PUBLISHER_WORKFLOW + "@" + publisher["ref"]
+                       and policy.hex_value(publisher["source_sha"], 40)
+                       and publisher["workflow_sha"] == publisher["source_sha"], "Publisher workflow/source refused")
+        for key in ("repository_id", "run_id", "run_attempt", "workflow_id"):
+            _selected_id(publisher[key])
+        policy.require(publisher["run_attempt"] == 1, "Publisher rerun refused")
+        policy.require(type(protection) is dict and set(protection) == {"environment", "branches", "tag"},
+                       "Protection selection fields refused")
+        env = protection["environment"]
+        policy.require(type(env) is dict and set(env) == {"id", "name", "branch_policy_id", "reviewer_ids"},
+                       "Environment selection fields refused")
+        name = _configuration_name(env["name"])
+        policy.require(not any(c in name for c in "\\?#%")
+                       and all(part not in ("", ".", "..") for part in name.split("/")), "Environment path refused")
+        reviewers = env["reviewer_ids"]
+        policy.require(type(reviewers) is list and 1 <= len(reviewers) <= 6, "Selected reviewers required")
+        reviewers = sorted(_selected_id(value) for value in reviewers)
+        policy.require(len(set(reviewers)) == len(reviewers), "Duplicate reviewer refused")
+        env = {"id": _selected_id(env["id"]), "name": name,
+               "branch_policy_id": _selected_id(env["branch_policy_id"]), "reviewer_ids": reviewers}
+        branches = protection["branches"]
+        policy.require(type(branches) is list and 1 <= len(branches) <= 2, "Selected branches required")
+        copied = []
+        for item in branches:
+            policy.require(type(item) is dict and set(item) == {"name", "tip", "approvals", "checks"}
+                           and policy.hex_value(item["tip"], 40), "Branch selection refused")
+            policy.require(_selected_id(item["approvals"]) <= 6, "Review count refused")
+            copied.append({"name": _branch_name(item["name"]), "tip": item["tip"],
+                           "approvals": item["approvals"], "checks": _checks(item["checks"])})
+        policy.require(len({item["name"] for item in copied}) == len(copied)
+                       and {item["name"] for item in copied} == {policy.BRANCH, branch}, "Lineage branches refused")
+        policy.require(next(item["tip"] for item in copied if item["name"] == branch) == publisher["source_sha"],
+                       "Publisher branch/source mismatch")
+        tag = protection["tag"]
+        policy.require(type(tag) is dict and set(tag) == {"name", "object"} and type(tag["name"]) is str
+                       and 1 <= len(tag["name"]) <= 65 and policy.hex_value(tag["object"], 40), "Tag selection refused")
+        policy.matching_tag(tag["name"][1:], tag["name"])
+        _validate_read_token(token)
+        return publisher, {"environment": env, "branches": sorted(copied, key=lambda item: item["name"]),
+                           "tag": tag.copy()}
+    except Exception:
+        raise policy.Refusal("Publisher selection refused") from None
+
+
+def _publisher_run(value, selected):
+    fields = {"id": selected["run_id"], "run_attempt": 1, "workflow_id": selected["workflow_id"],
+              "head_sha": selected["source_sha"], "head_branch": selected["ref"][len("refs/heads/"):],
+              "path": PUBLISHER_WORKFLOW, "event": "workflow_dispatch", "status": "in_progress", "conclusion": None}
+    policy.require(all(key in value and type(value[key]) is type(expected) and value[key] == expected
+                       for key, expected in fields.items()), "Publisher invocation changed or ineligible")
+    for key in ("repository", "head_repository"):
+        repo = value.get(key)
+        policy.require(type(repo) is dict and type(repo.get("id")) is int and repo["id"] == selected["repository_id"]
+                       and repo.get("full_name") == policy.REPOSITORY, "Publisher repository identity refused")
+
+
+def _reviewer_protection(value, selected):
+    policy.require(value.get("can_admins_bypass") is False, "Explicit environment bypass denial required")
+    rules = value.get("protection_rules")
+    policy.require(type(rules) is list and 1 <= len(rules) <= 2
+                   and all(type(rule) is dict for rule in rules), "Environment protection proof required")
+    kinds = [rule.get("type") for rule in rules]
+    policy.require(kinds.count("required_reviewers") == 1 and kinds.count("branch_policy") <= 1
+                   and all(kind in ("required_reviewers", "branch_policy") for kind in kinds), "Unknown protection rule")
+    rule = next(rule for rule in rules if rule["type"] == "required_reviewers")
+    policy.require(rule.get("prevent_self_review") is True, "Self-review prevention required")
+    reviewers = rule.get("reviewers")
+    policy.require(type(reviewers) is list and len(reviewers) == len(selected["reviewer_ids"]), "Reviewer list changed")
+    identities = []
+    for item in reviewers:
+        policy.require(type(item) is dict and item.get("type") == "User" and type(item.get("reviewer")) is dict
+                       and item["reviewer"].get("type") == "User", "Named user reviewer required")
+        identities.append(_selected_id(item["reviewer"].get("id")))
+    policy.require(sorted(identities) == selected["reviewer_ids"], "Selected reviewer identity changed")
+    return {"reviewer_ids": sorted(identities), "prevent_self_review": True,
+            "can_admins_bypass": False, "rule_types": sorted(kinds)}
+
+
+def _branch_protection(value, selected):
+    for key, enabled in (("enforce_admins", True), ("allow_force_pushes", False), ("allow_deletions", False)):
+        policy.require(type(value.get(key)) is dict and value[key].get("enabled") is enabled, "Branch policy refused")
+    reviews = value.get("required_pull_request_reviews")
+    policy.require(type(reviews) is dict and reviews.get("dismiss_stale_reviews") is True
+                   and reviews.get("require_last_push_approval") is True
+                   and type(reviews.get("required_approving_review_count")) is int
+                   and reviews["required_approving_review_count"] == selected["approvals"], "Branch review policy refused")
+    bypass = reviews.get("bypass_pull_request_allowances")
+    policy.require(type(bypass) is dict and set(bypass) == {"users", "teams", "apps"}
+                   and all(type(items) is list and not items for items in bypass.values()), "Explicit zero bypass required")
+    checks = value.get("required_status_checks")
+    policy.require(type(checks) is dict and checks.get("strict") is True
+                   and _checks(checks.get("checks")) == selected["checks"], "Required check policy changed")
+    contexts = checks.get("contexts")
+    policy.require(type(contexts) is list and all(type(item) is str for item in contexts)
+                   and sorted(contexts) == [item["context"] for item in selected["checks"]], "Ambiguous check contexts")
+
+
+def acquire_publisher_policy(publisher, protection, *, token=None):
+    """Fresh comparison-only facts. Neither API equality nor this projection proves approval.
+
+    Missing reviewer/bypass/lineage proof refuses; no discovery/fallback API is used.
+    Multiple GETs are not atomic and cannot reserve a policy, ref or invocation.
+    """
+    try:
+        publisher, protection = validated_publisher_request(publisher, protection, token=token)
+        prefix = "/repos/" + policy.REPOSITORY
+        run = prefix + "/actions/runs/" + str(publisher["run_id"])
+        _publisher_run(_get_json(run + "/attempts/1", token), publisher)
+        env = protection["environment"]
+        branch = publisher["ref"][len("refs/heads/"):]
+        selected = ((env["branch_policy_id"], branch, "branch"),)
+        observed, first, final = _environment_observation(env["name"], env["id"], selected, token)
+        first = _reviewer_protection(first, env)
+        final = _reviewer_protection(final, env)
+        policy.require(first == final, "Environment protection changed during observation")
+        observed.update(final)
+        tag = protection["tag"]
+        actual = _get_json(prefix + "/git/ref/tags/" + quote(tag["name"], safe=""), token)
+        obj = actual.get("object")
+        policy.require(actual.get("ref") == "refs/tags/" + tag["name"] and type(obj) is dict
+                       and obj.get("sha") == tag["object"] and obj.get("type") in ("commit", "tag"), "Remote tag changed")
+        for item in protection["branches"]:
+            path = prefix + "/branches/" + quote(item["name"], safe="")
+            actual = _get_json(path, token)
+            policy.require(actual.get("name") == item["name"] and actual.get("protected") is True
+                           and type(actual.get("commit")) is dict and actual["commit"].get("sha") == item["tip"],
+                           "Remote protected branch changed")
+            _branch_protection(_get_json(path + "/protection", token), item)
+        _publisher_run(_get_json(run, token), publisher)
+        return {"publisher": publisher, "environment": observed, "branches": protection["branches"], "tag": tag}
+    except Exception:
+        raise policy.Refusal("Publisher policy observation refused") from None
 
 
 def acquire_official_receipts(expected, token=None):

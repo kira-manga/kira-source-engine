@@ -473,3 +473,30 @@ evidence. They do not replay the existing policy, lineage or GET suites:
 PYTHONPATH=.github/scripts python3 -B -m unittest \
   test_connected_publication_intake.ConnectedIntakeTests -v
 ```
+
+### Connected publisher preflight/recheck (read-only)
+
+`publisher_publication_intake.publisher_preflight(...)` and `publisher_recheck(...)`
+reuse actual connected candidate intake, acquire fresh publisher/policy observations,
+and finally reread local source/archive bytes and existing tag/ancestry proof. Recheck
+repeats native verification and official GETs before comparing the earlier projection;
+it cannot reuse a saved PASS. The independent selection contains `producer`, `publisher`,
+`protection`, `app_parity_ref` and `backend_parity_ref`. The publisher is a **separate**
+exact repository/run/workflow/ref/SHA tuple: dispatch, attempt 1, currently in progress,
+not the completed producer. The future trusted workflow must supply its own invocation.
+No operational environment, reviewer, version, publisher branch or parity evidence is selected
+by this source. Parity references are bounded bindings, not assertions of passing qualification.
+
+The separate `acquire_publisher_policy` API uses only the existing bounded fixed-host GET
+transport. It requires explicitly selected User reviewer IDs, self-review prevention,
+admin-bypass denial, one literal publisher-branch policy and exact protected branch
+tips/review counts/status-check app identities. Missing review-bypass proof, unknown rules,
+HTTP errors or changed tag/lineage facts refuse; no discovery or fallback is performed.
+The old three-GET environment observation API is unchanged. These sequential observations
+are neither atomic nor native approval: workflow placement behind genuine environment
+approval, later writer-boundary rechecks, all-writer/unused-GAV authority, remote Maven
+readback and consumer acceptance remain separate. Both full calls require a fresh checkout,
+before Gradle restoration, and keep the unconditional Stage C hold. No CLI, credential
+discovery, workflow or publisher activation was added; explicit read tokens only reach GETs.
+Focused synthetic classes are `test_publisher_publication_intake.PublisherIntakeTests` and
+`test_github_publication_receipts.PublisherPolicyAcquisitionTests`; no live approval follows.
