@@ -23,10 +23,10 @@ import publisher_workflow as common
 
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
-SELECTION_SHA256 = "5d828cae9169355af1e1add1917c77802b3562054d0db2be7fe14a6675fc3d2b"
-APP_SHA = "3727c57508d29a6bc489f5ef826b8876cbbf35c8"
+SELECTION_SHA256 = "42d71c54d9bd83631417ed734333bf49e1a88f48aded52c721e8bd32edf6d0b3"
+APP_SHA = "2cab935029f94111fface30d0d52527f2c517648"
 BACKEND_SHA = "97a7b72d02c1116f79702adc1c605d4cff093d15"
-APP_INIT_SHA = "04731055936347f1b6b132e2da015e4aa790c684496d92a8d9d6df83b77e2eda"
+APP_INIT_SHA = "7eb405ed2f55e81f06f077a5b025b8993ba0f396c60ae1fed31c45f3f13b02e8"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
 RUNTIME_PREFIX = "me.manga.kira.sources.runtime."
@@ -400,7 +400,7 @@ def scope(job, label, ready=None):
         return ["test", *[part for name in names for part in ("--tests", name)], "-x", "jacocoTestReport"], {
             "build/test-results/test": {BACKEND_PREFIX + name for name in BACKEND_TESTS} | {READER_TEST}}
     if job.phase == "apple":
-        return [":composeApp:compileKotlinIosSimulatorArm64",
+        return [":composeApp:compileKotlinIosArm64", ":composeApp:compileKotlinIosSimulatorArm64",
                 ":composeApp:iosSimulatorArm64Test", "--device", ready["simulator_uuid"], "--tests", IOS_TRANSPORT], {
                     "composeApp/build/test-results/iosSimulatorArm64Test": {IOS_TRANSPORT}}
     selectors = [ENGINE_PREFIX + name for name in ("DefaultSourceConfigValidator*Test", "GenericSourceClient*GoldenTest", "GenericSourceClientScriptJsonTest")]

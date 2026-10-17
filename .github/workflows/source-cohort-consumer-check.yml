@@ -24,10 +24,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Genuine completed promotion39033708659, independently selected after success.
-  # Original producer647 executions are not replayed; no packages token is needed.
+  # Genuine completed promotion39051133291, independently selected after success.
+  # Original producer671 executions are not replayed; no packages token is needed.
   SELECTED_PROMOTION: >-
-    {"artifact_id":12100768388,"artifact_name":"kira-owned-file-promotion-39033708659-1","artifact_sha256":"3716f1a7daee663757b5f0e4dc73e919f0a61edffaf2fb8c15131dbfb5a6f7b9","artifact_size":2116079,"job_id":117399208609,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"abed82966db185e24d3360b37071f56867f8d1fc1f560e91a4b601ad80a1499d","size":2590720},"producer":{"archive_sha256":"c569c370150f6a66726f163f53ad9cfdf7c4ba1aff1da6129a6467183259eee7","artifact_id":12098874819,"attestation_job_id":117387250101,"inventory_sha256":"635553b54619b37ac56bf13a368a6adeede610c54767c3b576d72b7b3ab214a8","producer_job_id":117383746484,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39028369302,"seal_sha256":"43376f7f214de60b5e85d00d6191ebf49d16706f164ad7b04994cf27e64d6d9c","source_sha":"e614df497d0a598feb097fd6d18d67051fd3e531","source_tree":"5c156f9a7b68c64dc3ef7687a0b7ae85bb99ee3a","transport_sha256":"224c4c67e591aee10c8f68fb8c21c2e71c7fa98451bd0fe36f2c9ab571c26322","version":"0.2.0","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"e614df497d0a598feb097fd6d18d67051fd3e531","workflow_sha256":"e38cba5610b19943e4e4d9d4b71a2574b21e2ad780b1e598cc486df3166d74a0"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39033708659,"source_sha":"41e9d67e8fd8b363b501da28d3f3e107ebdefa99","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
+    {"artifact_id":12106899203,"artifact_name":"kira-owned-file-promotion-39051133291-1","artifact_sha256":"215bf9d4aa0c0db59fe2c781a30301f3d6861e77d74dca2430e973026c4f0307","artifact_size":2126103,"job_id":117449774086,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"0f5077fb530f1863997c71dd6d19cf7ba63bba35bc27608329d1a1fd9be53482","size":2600960},"producer":{"archive_sha256":"9a81ab0ed2befed10ea7c716fdd03d5d8346b74c171fd49df9b7128abff3439b","artifact_id":12107171679,"attestation_job_id":117446096346,"inventory_sha256":"628cd0381c9ca9f738cc589f42629d812408f54742da4099af134bbb3f59becf","producer_job_id":117442236053,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39048582890,"seal_sha256":"4355de0cd6691c6d0fce0ac15c991bab58ad93a0df092eb4a5ecc9e4b9e896e1","source_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","source_tree":"9f9869fa47de0a82e001be5de04bbb9d61c662ad","transport_sha256":"8b4e882930deb520a8fecdf85a3793974d735d8a2e1b1b235195806c6db9065e","version":"0.2.0","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","workflow_sha256":"ca05d0e76818a5788cf83c0666ddd0efcf22c6b09653867e7d0d976883c1f0df"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39051133291,"source_sha":"25c5b0e8c9faaf8e1b040c88cea740c87af8cefb","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
 
 jobs:
   linux:
@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: 3727c57508d29a6bc489f5ef826b8876cbbf35c8
+          ref: 2cab935029f94111fface30d0d52527f2c517648
           path: app
           persist-credentials: false
       - name: Exact public Backend source candidate
@@ -145,7 +145,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: 3727c57508d29a6bc489f5ef826b8876cbbf35c8
+          ref: 2cab935029f94111fface30d0d52527f2c517648
           path: app
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
@@ -170,7 +170,7 @@ jobs:
       - name: App authenticated Kotlin2.4 libffi bootstrap using actual Engine owner context
         timeout-minutes: 15
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py bootstrap
-      - name: App simulator compile and corrected Darwin tests; prior unchanged device compile retained
+      - name: App device and simulator compile plus Darwin tests against the exact selected cohort
         timeout-minutes: 65
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
       - name: Always verify owned shutdown and remove only owned bootstrap
