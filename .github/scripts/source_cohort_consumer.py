@@ -24,9 +24,9 @@ import publisher_workflow as common
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
 SELECTION_SHA256 = "5d828cae9169355af1e1add1917c77802b3562054d0db2be7fe14a6675fc3d2b"
-APP_SHA = "fe4b3200324179ecb0566f9e94e22a89c9d129ad"
+APP_SHA = "3727c57508d29a6bc489f5ef826b8876cbbf35c8"
 BACKEND_SHA = "97a7b72d02c1116f79702adc1c605d4cff093d15"
-APP_INIT_SHA = "0f8acc7e5119de42917ca58d90a724e3e0a27cf4feb1f0119349c433a0f94d90"
+APP_INIT_SHA = "04731055936347f1b6b132e2da015e4aa790c684496d92a8d9d6df83b77e2eda"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
 RUNTIME_PREFIX = "me.manga.kira.sources.runtime."
@@ -41,6 +41,9 @@ PILOTS = ["Asq", "Azora", "DilarV2", "EnglishSources", "MadaraHtml", "Mangamello
 LIFECYCLE = "me.manga.kira.di.SourceCatalogHttpClientLifecycleTest"
 ANDROID_TRANSPORT = RUNTIME_PREFIX + "AndroidGenericSingleHopTest"
 IOS_TRANSPORT = RUNTIME_PREFIX + "IosGenericSingleHopTest"
+TRANSPORT_METHODS = {"getAndPostReturnOneHopWithoutFollowingTheCredentialedLocation",
+                     "exposedAmbiguityFailsClosedAndRawWireCollapseIsReported",
+                     "callerCancellationReleasesTheSocketAndOwnedCloseKeepsAnotherClientUsable"}
 BACKEND_TESTS = ["parsing.ManhwatopPublishedEngineTest", "parsing.AuthoredSourceConfigTest", "parsing.SourceConfigParserTest",
                  "validation.SourceConfigValidatorTest", "admin.FullBundledParityIT", "admin.SourcePreviewIT"]
 READER_TEST = BACKEND_PREFIX + "validation.SourceConfigValidatorReaderCapabilityTest"
@@ -289,7 +292,7 @@ def fixture(job, env, action):
     finally:
         owned.write_json(log.with_suffix(".json"), {"action": action, "platform": mode, "elapsed_seconds": round(time.monotonic() - started, 3)})
         if action == "cleanup":
-            for name in ("owner.json", "ready.json", "simulator.json", "stats.json", "cleanup.json"):
+            for name in ("owner.json", "ready.json", "simulator.json", "stats.json", "cleanup.json", "server.log"):
                 path = root / name
                 if path.exists():
                     common.write_private(job.root / "diagnostics" / (log.stem + "-" + name), policy.read_small(path))
@@ -397,7 +400,7 @@ def scope(job, label, ready=None):
         return ["test", *[part for name in names for part in ("--tests", name)], "-x", "jacocoTestReport"], {
             "build/test-results/test": {BACKEND_PREFIX + name for name in BACKEND_TESTS} | {READER_TEST}}
     if job.phase == "apple":
-        return [":composeApp:compileKotlinIosArm64", ":composeApp:compileKotlinIosSimulatorArm64",
+        return [":composeApp:compileKotlinIosSimulatorArm64",
                 ":composeApp:iosSimulatorArm64Test", "--device", ready["simulator_uuid"], "--tests", IOS_TRANSPORT], {
                     "composeApp/build/test-results/iosSimulatorArm64Test": {IOS_TRANSPORT}}
     selectors = [ENGINE_PREFIX + name for name in ("DefaultSourceConfigValidator*Test", "GenericSourceClient*GoldenTest", "GenericSourceClientScriptJsonTest")]
@@ -424,15 +427,22 @@ def capture_xml(job, label, source, expected):
             policy.require(len(data) <= 2 * 1024 * 1024 and b"<!DOCTYPE" not in data and b"<!ENTITY" not in data, "XML size/entity refused")
             common.write_private(target / path.name, data)
             suite = ET.fromstring(data)
-            name = suite.attrib.get("name")
             cases = suite.findall("testcase")
+            # KMP JVM uses a display-only suite name (Class[desktop]); Native
+            # prefixes testcase class identity with the exact Gradle task name.
+            prefix = "iosSimulatorArm64Test." if Path(directory).name == "iosSimulatorArm64Test" else ""
+            names = {case.attrib.get("classname", "").removeprefix(prefix) for case in cases}
+            name = next(iter(names)) if len(names) == 1 else None
+            methods = [case.attrib.get("name", "") for case in cases]
             counts = {key: int(suite.attrib[key]) for key in ("tests", "failures", "errors", "skipped")}
-            valid &= name in wanted and name not in found and counts["tests"] == len(cases) > 0 and all(counts[key] == 0 for key in ("failures", "errors", "skipped"))
+            valid &= suite.tag == "testsuite" and name in wanted and name not in found and counts["tests"] == len(cases) > 0 and all(counts[key] == 0 for key in ("failures", "errors", "skipped"))
+            valid &= len(set(methods)) == len(methods) and all(methods)
             valid &= not any(case.find(kind) is not None for case in cases for kind in ("failure", "error", "skipped"))
             if name == READER_TEST:
                 valid &= len(cases) == 1 and cases[0].attrib.get("name", "").removesuffix("()") == FINITE_FEEDS
             if name in (ANDROID_TRANSPORT, IOS_TRANSPORT):
-                valid &= len(cases) == 3
+                suffix = "[iosSimulatorArm64]" if name == IOS_TRANSPORT else "[android]"
+                valid &= len(cases) == 3 and {method.removesuffix(suffix) for method in methods} == TRANSPORT_METHODS
             found.add(name)
             observed[name] = counts
         valid &= found == wanted
@@ -491,6 +501,11 @@ def batch(job, label, env):
     if job.phase == "apple":
         app_bootstrap(job).verify(env)
     if label == "backend":
+        # A failed App assertion must not hide independent Backend findings, but
+        # never overlap it with an incompletely stopped/disposed App batch.
+        app_result = policy.json_data(policy.read_small(job.root / "diagnostics/app-result.json"))
+        policy.require(app_result.get("workers_stopped") is True and not job.producer.exists() and
+                       not (job.root / "app").exists(), "App workers/outputs must be disposed before Backend")
         docker_empty(child)
         policy.require(run_command(["/usr/bin/docker", "version"], source, child,
                        job.root / "diagnostics/docker-version.log", 30) == 0, "Actual Docker unavailable")

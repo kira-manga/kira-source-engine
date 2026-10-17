@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tarfile
 from unittest import mock
+import xml.etree.ElementTree as ET
 
 import source_cohort_consumer as caller
 import publication_policy as policy
@@ -194,3 +195,49 @@ class SourceCohortConsumerTests(fixtures.OwnedFixture):
                 self.assertNotIn("JAVA_TOOL_OPTIONS", child)
                 if phase == "apple":
                     self.assertEqual(child["KONAN_DATA_DIR"], env["KONAN_DATA_DIR"])
+
+    def test_xml_uses_case_identity_for_jvm_display_and_native_task_names(self):
+        for task, name, display, prefix, suffix in (
+            ("desktopTest", caller.ENGINE_PREFIX + "DefaultSourceConfigValidatorTest", "DefaultSourceConfigValidatorTest[desktop]", "", "[desktop]"),
+            ("testAndroidHostTest", caller.ANDROID_TRANSPORT, "AndroidGenericSingleHopTest[android]", "", "[android]"),
+            ("iosSimulatorArm64Test", caller.IOS_TRANSPORT, "iosSimulatorArm64Test." + caller.IOS_TRANSPORT, "iosSimulatorArm64Test.", "[iosSimulatorArm64]"),
+        ):
+            with self.subTest(task=task):
+                methods = sorted(caller.TRANSPORT_METHODS) if name in (caller.ANDROID_TRANSPORT, caller.IOS_TRANSPORT) else ["validDocument"]
+                suite = ET.Element("testsuite", name=display, tests=str(len(methods)), failures="0", errors="0", skipped="0")
+                for method in methods:
+                    ET.SubElement(suite, "testcase", classname=prefix + name, name=method + suffix)
+                self.assertTrue(self.xml_result(task, name, suite)["valid"])
+                suite[0].set("classname", "another.task." + name)
+                self.assertFalse(self.xml_result(task, name, suite)["valid"])
+
+    def test_xml_refuses_missing_mixed_duplicate_skipped_or_false_success(self):
+        name = caller.IOS_TRANSPORT
+        for variant in ("missing", "mixed", "duplicate", "skipped", "failure", "counts", "wrong-method"):
+            with self.subTest(variant=variant):
+                suite = ET.Element("testsuite", name=name, tests="3", failures="0", errors="0", skipped="0")
+                for method in sorted(caller.TRANSPORT_METHODS):
+                    ET.SubElement(suite, "testcase", classname="iosSimulatorArm64Test." + name, name=method + "[iosSimulatorArm64]")
+                if variant == "missing":
+                    suite.remove(suite[0])
+                    suite.set("tests", "2")
+                elif variant == "mixed":
+                    suite[0].set("classname", caller.ANDROID_TRANSPORT)
+                elif variant == "duplicate":
+                    suite[0].set("name", suite[1].get("name"))
+                elif variant in ("skipped", "failure"):
+                    ET.SubElement(suite[0], variant)
+                elif variant == "counts":
+                    suite.set("failures", "1")
+                else:
+                    suite[0].set("name", "unrelatedTest[iosSimulatorArm64]")
+                self.assertFalse(self.xml_result("iosSimulatorArm64Test", name, suite)["valid"])
+
+    def xml_result(self, task, name, suite):
+        root = self.root / ("xml-" + str(len(list(self.root.glob("xml-*")))))
+        directory = "build/test-results/" + task
+        (root / "source" / directory).mkdir(parents=True)
+        (root / "diagnostics").mkdir()
+        ET.ElementTree(suite).write(root / "source" / directory / ("TEST-" + name + ".xml"))
+        job = caller.common.Runtime(self.root / "control", root / "source", root, {}, "apple")
+        return caller.capture_xml(job, "app", root / "source", {directory: {name}})

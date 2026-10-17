@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: fe4b3200324179ecb0566f9e94e22a89c9d129ad
+          ref: 3727c57508d29a6bc489f5ef826b8876cbbf35c8
           path: app
           persist-credentials: false
       - name: Exact public Backend source candidate
@@ -90,9 +90,11 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: App JVM contracts and Android compile plus native transport tests; capture stop dispose
+        id: app_batch
         timeout-minutes: 36
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
       - name: Backend selected unit and real PostgreSQL parity-preview batch; capture stop dispose
+        if: ${{ !cancelled() && (steps.app_batch.outcome == 'success' || steps.app_batch.outcome == 'failure') }}
         timeout-minutes: 18
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py backend
       - name: Always verify owned worker shutdown before evidence/disposal
@@ -143,7 +145,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: fe4b3200324179ecb0566f9e94e22a89c9d129ad
+          ref: 3727c57508d29a6bc489f5ef826b8876cbbf35c8
           path: app
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
@@ -168,7 +170,7 @@ jobs:
       - name: App authenticated Kotlin2.4 libffi bootstrap using actual Engine owner context
         timeout-minutes: 15
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py bootstrap
-      - name: Both App Apple compiles plus Darwin transport tests; capture stop dispose
+      - name: App simulator compile and corrected Darwin tests; prior unchanged device compile retained
         timeout-minutes: 65
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
       - name: Always verify owned shutdown and remove only owned bootstrap
