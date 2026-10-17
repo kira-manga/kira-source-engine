@@ -1,4 +1,4 @@
-"""Synthetic extraction-boundary tests only; no native/consumer/network qualification."""
+"""Synthetic intake/selection/cleanup boundaries; no native/consumer/network qualification."""
 
 import hashlib
 import io
@@ -146,6 +146,113 @@ class SourceCohortConsumerTests(fixtures.OwnedFixture):
             with self.subTest(changed=tuple(changed)), self.assertRaises(policy.Refusal):
                 caller.selection(changed)
 
+    def test_backend_only_requires_the_sole_tag_in_the_exact_push_control_commit(self):
+        context = {"GITHUB_EVENT_NAME": "push", "GITHUB_WORKFLOW_SHA": fixtures.SHA}
+        for phase in ("linux", "apple"):
+            job = caller.common.Runtime(self.root / "control", self.root / "app", self.root, context, phase)
+            for event in ("push", "workflow_dispatch"):
+                context["GITHUB_EVENT_NAME"] = event
+                for mask in range(8):
+                    tags = [tag for index, tag in enumerate(("apple", "linux", "backend")) if mask & (1 << index)]
+                    for upper in (False, True):
+                        message = "test-only " + " ".join("[consumer " + tag + "]" for tag in tags)
+                        with self.subTest(phase=phase, event=event, tags=tags, upper=upper), \
+                                mock.patch.object(caller.policy, "git", return_value=(message.upper() if upper else message).encode()) as git:
+                            self.assertEqual(caller.backend_only(job), phase == "linux" and event == "push" and tags == ["backend"])
+                            if phase == "linux" and event == "push":
+                                git.assert_called_once_with(job.control, "show", "-s", "--format=%B", fixtures.SHA)
+                            else:
+                                git.assert_not_called()
+
+    def test_control_lookup_sanitizes_globals_before_git_and_selects_backend_home(self):
+        context = {"GITHUB_EVENT_NAME": "push", "GITHUB_WORKFLOW_SHA": fixtures.SHA}
+        job = caller.common.Runtime(self.root / "control", self.root / "app", self.root / "job", context, "linux")
+        ambient = {"PATH": "/synthetic/ambient", "HOME": "/synthetic/home", "KIRA_PROMOTION_SELECTION": "{}",
+                   "KIRA_INTAKE_READ_TOKEN": "synthetic-not-a-credential", "GITHUB_TOKEN": "synthetic-not-a-credential"}
+        observed = []
+
+        def git(*args, **kwargs):
+            observed.append((dict(caller.os.environ), kwargs["env"]))
+            return mock.Mock(stdout=b"[consumer backend]\n")
+
+        with mock.patch.dict(caller.os.environ, ambient, clear=True), \
+                mock.patch.object(caller.sys, "argv", ["source_cohort_consumer.py", "prepare"]), \
+                mock.patch.object(caller, "runtime", return_value=job), \
+                mock.patch.object(caller.policy.subprocess, "run", side_effect=git) as run, \
+                mock.patch.object(caller, "prepare", side_effect=lambda *args: observed.append(dict(caller.os.environ))), \
+                mock.patch.object(caller.os, "umask"), mock.patch.object(caller.signal, "signal"), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            result = caller.main()
+        self.assertEqual(result, 0)
+        self.assertEqual(len(observed), 2)
+        expected = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(job.root / "tmp"),
+                    "TMPDIR": str(job.root / "tmp"), "LANG": "C"}
+        self.assertEqual(observed[0][0], expected)
+        self.assertEqual(observed[0][1], expected | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": caller.os.devnull,
+                                                   "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0"})
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["git", "-C", str(job.control), "show", "-s", "--format=%B", fixtures.SHA])
+        self.assertEqual(observed[1], expected | {"HOME": str(job.root / "backend/home")})
+
+    def test_backend_only_prepare_omits_app_and_refuses_app_state_instead_of_forging_success(self):
+        workflow = Path(__file__).parents[1] / "workflows/source-cohort-consumer-check.yml"
+        selected = json.loads(next(line.strip() for line in workflow.read_text().splitlines() if line.startswith('    {"')))
+        context = {"GITHUB_EVENT_NAME": "push", "GITHUB_WORKFLOW_SHA": fixtures.SHA, "GITHUB_RUN_ID": "31"}
+        job = caller.common.Runtime(self.root / "control", self.root / "app", self.root / "job", context, "linux")
+        env = {"GITHUB_OUTPUT": str(self.root / "output"), "GITHUB_ENV": str(self.root / "environment")}
+        with mock.patch.object(caller, "backend_only", return_value=True), \
+                mock.patch.object(caller.policy, "source_snapshot"), \
+                mock.patch.object(caller.shutil, "disk_usage", return_value=mock.Mock(free=16 * 1024**3)):
+            caller.prepare(job, selected, env)
+            self.assertIn("backend_only=true\n", (self.root / "output").read_text())
+            self.assertIn(str(job.root / "backend/gradle"), (self.root / "environment").read_text())
+            self.assertTrue(all((job.root / "backend" / folder).is_dir() for folder in ("gradle", "home", "tmp")))
+            caller.backend_prerequisites(job)
+            self.assertFalse((job.root / "diagnostics/app-result.json").exists())
+            for path in (job.producer, job.root / "app", caller.fixture_root(job)):
+                self.assertFalse(path.exists())
+                path.mkdir()
+                with self.assertRaises(policy.Refusal):
+                    caller.backend_prerequisites(job)
+                path.rmdir()
+                path.symlink_to(self.root / "missing", target_is_directory=True)
+                with self.assertRaises(policy.Refusal):
+                    caller.backend_prerequisites(job)
+                path.unlink()
+            caller.owned.write_json(job.root / "diagnostics/app-result.json", {"workers_stopped": True})
+            with self.assertRaises(policy.Refusal):
+                caller.backend_prerequisites(job)
+        with mock.patch.object(caller, "backend_only", return_value=False):
+            caller.backend_prerequisites(job)  # Existing full-Linux path still requires its stopped-App receipt.
+            (job.root / "diagnostics/app-result.json").write_text('{"workers_stopped":false}')
+            with self.assertRaises(policy.Refusal):
+                caller.backend_prerequisites(job)
+
+    def test_backend_menu_keeps_original_scope_and_requires_all_reconciliation_executions(self):
+        job = caller.common.Runtime(self.root / "control", self.root / "app", self.root, {}, "linux")
+        for only_backend in (False, True):
+            with self.subTest(only_backend=only_backend), mock.patch.object(caller, "backend_only", return_value=only_backend):
+                command, expected = caller.scope(job, "backend")
+                self.assertEqual(command[0], "test")
+                self.assertEqual(command[-2:], ["-x", "jacocoTestReport"])
+                names = command[2:-2:2]
+                self.assertEqual(command[1:-2:2], ["--tests"] * len(names))
+                if only_backend:
+                    self.assertEqual(set(names), set(caller.RECONCILIATION_TESTS))
+                    self.assertEqual(expected["build/test-results/test"], set(names))
+                    self.assertEqual((len(names), sum(caller.RECONCILIATION_TESTS.values())), (8, 49))
+                    with self.assertRaises(policy.Refusal):
+                        caller.scope(job, "app")
+                else:
+                    self.assertEqual(names, [caller.BACKEND_PREFIX + name for name in caller.BACKEND_TESTS] +
+                                     [caller.READER_TEST + "." + caller.FINITE_FEEDS])
+        for name, count in caller.RECONCILIATION_TESTS.items():
+            for actual in (count, count - 1):
+                suite = ET.Element("testsuite", name=name, tests=str(actual), failures="0", errors="0", skipped="0")
+                for index in range(actual):
+                    ET.SubElement(suite, "testcase", classname=name, name="testOnly" + str(index))
+                self.assertEqual(self.xml_result("test", name, suite, label="backend")["valid"], actual == count)
+
     def test_fixture_refusal_keeps_cleanup_independent_without_crossing_worker_barrier(self):
         for worker_fails in (False, True):
             with self.subTest(worker_fails=worker_fails):
@@ -233,11 +340,11 @@ class SourceCohortConsumerTests(fixtures.OwnedFixture):
                     suite[0].set("name", "unrelatedTest[iosSimulatorArm64]")
                 self.assertFalse(self.xml_result("iosSimulatorArm64Test", name, suite)["valid"])
 
-    def xml_result(self, task, name, suite):
+    def xml_result(self, task, name, suite, label="app"):
         root = self.root / ("xml-" + str(len(list(self.root.glob("xml-*")))))
         directory = "build/test-results/" + task
         (root / "source" / directory).mkdir(parents=True)
         (root / "diagnostics").mkdir()
         ET.ElementTree(suite).write(root / "source" / directory / ("TEST-" + name + ".xml"))
         job = caller.common.Runtime(self.root / "control", root / "source", root, {}, "apple")
-        return caller.capture_xml(job, "app", root / "source", {directory: {name}})
+        return caller.capture_xml(job, label, root / "source", {directory: {name}})

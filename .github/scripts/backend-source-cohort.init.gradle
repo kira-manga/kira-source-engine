@@ -64,19 +64,27 @@ def wanted = rows.findAll {
 }
 require(wanted.size() == 2 && wanted.collect { it.project }.toSet().size() == 2, 'Two selected JVM binaries required')
 def prefix = 'me.manga.kira.backend.sourceconfig.'
-def selectors = [
+def originalSelectors = [
     'parsing.ManhwatopPublishedEngineTest', 'parsing.AuthoredSourceConfigTest', 'parsing.SourceConfigParserTest',
     'validation.SourceConfigValidatorTest', 'admin.FullBundledParityIT', 'admin.SourcePreviewIT',
     'validation.SourceConfigValidatorReaderCapabilityTest.finite feeds survive canonical authoring and reject unsupported verbs',
 ].collect { prefix + it }.toSet()
+def reconciliationSelectors = [
+    'admin.SourceCatalogReconciliationIT', 'api.GenericV2CutoverControllerTest',
+    'FlywayMigrationIT', 'FlywayIncrementalOrderIT', 'admin.BootstrapPublicationGuardIT',
+    'admin.BootstrapReplayIT', 'admin.BootstrapEndpointIT', 'admin.BootstrapLateRollbackIT',
+].collect { prefix + it }.toSet()
+def menus = [originalSelectors, reconciliationSelectors]
 def arguments = gradle.startParameter.taskNames
-require(arguments && arguments[0] == 'test' && arguments.size() == 1 + 2 * selectors.size(), 'One exact Backend test batch required')
+require(arguments && arguments[0] == 'test' && menus.any { arguments.size() == 1 + 2 * it.size() },
+    'One exact Backend test batch required')
 def actual = []
 for (int index = 1; index < arguments.size(); index += 2) {
     require(arguments[index] == '--tests', 'Only explicit task-scoped test filters are admitted')
     actual.add(arguments[index + 1])
 }
-require(actual.size() == actual.toSet().size() && actual.toSet() == selectors, 'Backend selected tests changed')
+require(actual.size() == actual.toSet().size() && menus.any { actual.toSet() == it }, 'Backend selected tests changed')
+def selectors = actual.toSet()
 require(gradle.startParameter.excludedTaskNames.toSet() == ['jacocoTestReport'].toSet(), 'Only existing Jacoco exclusion is admitted')
 require(!gradle.startParameter.writeDependencyLocks && gradle.startParameter.lockedDependenciesToUpdate.isEmpty(), 'Lock writing is forbidden')
 require(gradle.startParameter.dependencyVerificationMode.name() == 'STRICT' &&

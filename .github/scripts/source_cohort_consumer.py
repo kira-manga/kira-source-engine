@@ -25,7 +25,7 @@ import publisher_workflow as common
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
 SELECTION_SHA256 = "42d71c54d9bd83631417ed734333bf49e1a88f48aded52c721e8bd32edf6d0b3"
 APP_SHA = "820daa4485138a1a36465ac6688537e0aa47edd4"
-BACKEND_SHA = "97a7b72d02c1116f79702adc1c605d4cff093d15"
+BACKEND_SHA = "1172a9d9be4d1083bdaefa8fbe50ea0776834234"
 APP_INIT_SHA = "7eb405ed2f55e81f06f077a5b025b8993ba0f396c60ae1fed31c45f3f13b02e8"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
@@ -46,6 +46,12 @@ TRANSPORT_METHODS = {"getAndPostReturnOneHopWithoutFollowingTheCredentialedLocat
                      "callerCancellationReleasesTheSocketAndOwnedCloseKeepsAnotherClientUsable"}
 BACKEND_TESTS = ["parsing.ManhwatopPublishedEngineTest", "parsing.AuthoredSourceConfigTest", "parsing.SourceConfigParserTest",
                  "validation.SourceConfigValidatorTest", "admin.FullBundledParityIT", "admin.SourcePreviewIT"]
+RECONCILIATION_TESTS = {BACKEND_PREFIX + name: count for name, count in (
+    ("admin.SourceCatalogReconciliationIT", 7), ("api.GenericV2CutoverControllerTest", 10),
+    ("FlywayMigrationIT", 3), ("FlywayIncrementalOrderIT", 14),
+    ("admin.BootstrapPublicationGuardIT", 5), ("admin.BootstrapReplayIT", 2),
+    ("admin.BootstrapEndpointIT", 6), ("admin.BootstrapLateRollbackIT", 2),
+)}
 READER_TEST = BACKEND_PREFIX + "validation.SourceConfigValidatorReaderCapabilityTest"
 FLAGS = ["--no-daemon", "--no-parallel", "--max-workers=1", "--no-build-cache", "--no-configuration-cache",
          "--dependency-verification=strict", "--console=plain", "--stacktrace", "-Pkotlin.compiler.execution.strategy=in-process",
@@ -196,6 +202,15 @@ def runtime(env):
     return common.Runtime(workspace / "control", workspace / "app", temp / ("kira-source-consumer-" + context["GITHUB_RUN_ID"] + "-1-" + phase), context, phase)
 
 
+def backend_only(job):
+    if job.phase != "linux" or job.context["GITHUB_EVENT_NAME"] != "push":
+        return False
+    message = policy.git(job.control, "show", "-s", "--format=%B", job.context["GITHUB_WORKFLOW_SHA"])
+    policy.require(len(message) <= 64 * 1024, "Consumer selector message bound")
+    message = message.decode("utf-8").lower()  # Match GitHub's case-insensitive contains().
+    return {tag for tag in ("apple", "linux", "backend") if "[consumer " + tag + "]" in message} == {"backend"}
+
+
 def prepare(job, value, env):
     policy.check_environment(env)
     selected = selection(value)
@@ -205,9 +220,11 @@ def prepare(job, value, env):
         policy.require(not path.exists() and not path.is_symlink(), "Consumer locations must be fresh")
     job.root.mkdir(mode=0o700)
     owned.write_json(job.root / "owner.json", job.owner())
+    only_backend = backend_only(job)
     with Path(env["GITHUB_OUTPUT"]).open("a") as stream:
-        stream.write(f"root={job.root}\nrun_id={selected['run_id']}\nartifact_id={selected['artifact_id']}\n")
-    for name in ("artifact", "diagnostics", "tmp", "app/gradle", "app/home", "app/tmp", "backend/gradle", "backend/home", "backend/tmp"):
+        stream.write(f"root={job.root}\nrun_id={selected['run_id']}\nartifact_id={selected['artifact_id']}\nbackend_only={str(only_backend).lower()}\n")
+    labels = ("backend",) if only_backend else ("app", "backend")
+    for name in ("artifact", "diagnostics", "tmp", *(label + "/" + folder for label in labels for folder in ("gradle", "home", "tmp"))):
         (job.root / name).mkdir(mode=0o700, parents=True, exist_ok=True)
     owned.write_json(job.root / "selection.json", selected)
     owned.write_json(job.root / "diagnostics/context.json", job.owner())
@@ -215,7 +232,8 @@ def prepare(job, value, env):
     owned.write_json(job.root / "diagnostics/resources.json", {"free_disk_bytes": free, "host": platform.platform()})
     policy.require(free >= 12 * 1024**3, "Insufficient fresh hosted disk; do not purge shared caches")
     with Path(env["GITHUB_ENV"]).open("a") as stream:
-        stream.write(f"GRADLE_USER_HOME={job.root}/app/gradle\nTMPDIR={job.root}/tmp\n")
+        home = "backend" if only_backend else "app"
+        stream.write(f"GRADLE_USER_HOME={job.root}/{home}/gradle\nTMPDIR={job.root}/tmp\n")
 
 
 def source_state(root, sha):
@@ -395,7 +413,12 @@ def run_command(command, cwd, env, output, seconds):
 
 
 def scope(job, label, ready=None):
+    only_backend = backend_only(job)
+    policy.require(not only_backend or label == "backend", "Backend-only cannot select App tasks")
     if label == "backend":
+        if only_backend:
+            return ["test", *[part for name in RECONCILIATION_TESTS for part in ("--tests", name)], "-x", "jacocoTestReport"], {
+                "build/test-results/test": set(RECONCILIATION_TESTS)}
         names = [BACKEND_PREFIX + name for name in BACKEND_TESTS] + [READER_TEST + "." + FINITE_FEEDS]
         return ["test", *[part for name in names for part in ("--tests", name)], "-x", "jacocoTestReport"], {
             "build/test-results/test": {BACKEND_PREFIX + name for name in BACKEND_TESTS} | {READER_TEST}}
@@ -440,6 +463,8 @@ def capture_xml(job, label, source, expected):
             valid &= not any(case.find(kind) is not None for case in cases for kind in ("failure", "error", "skipped"))
             if name == READER_TEST:
                 valid &= len(cases) == 1 and cases[0].attrib.get("name", "").removesuffix("()") == FINITE_FEEDS
+            if name in RECONCILIATION_TESTS:
+                valid &= counts["tests"] == RECONCILIATION_TESTS[name]
             if name in (ANDROID_TRANSPORT, IOS_TRANSPORT):
                 suffix = "[iosSimulatorArm64]" if name == IOS_TRANSPORT else "[android]"
                 valid &= len(cases) == 3 and {method.removesuffix(suffix) for method in methods} == TRANSPORT_METHODS
@@ -483,8 +508,18 @@ def native_cleanup(job, env):
     policy.require(not root.exists() and not root.is_symlink(), "Bootstrap remains")
 
 
+def backend_prerequisites(job):
+    if backend_only(job):
+        policy.require(not list((job.root / "diagnostics").glob("app-*")), "Backend-only cannot reuse App evidence")
+    else:
+        app_result = policy.json_data(policy.read_small(job.root / "diagnostics/app-result.json"))
+        policy.require(app_result.get("workers_stopped") is True, "App workers must be stopped before Backend")
+    policy.require(all(not path.exists() and not path.is_symlink() for path in
+                       (job.producer, job.root / "app", fixture_root(job))), "App checkout/fixture/outputs must be absent before Backend")
+
+
 def batch(job, label, env):
-    policy.require((label == "app") or (label == "backend" and job.phase == "linux"), "Unselected batch")
+    policy.require((label == "app" and not backend_only(job)) or (label == "backend" and job.phase == "linux"), "Unselected batch")
     selected = selection(policy.json_data(policy.read_small(job.root / "selection.json")))
     policy.require(policy.json_data(policy.read_small(job.root / "diagnostics/admission.json")) == selected, "Admitted owned cohort required")
     source = job.producer.with_name(label)
@@ -503,9 +538,7 @@ def batch(job, label, env):
     if label == "backend":
         # A failed App assertion must not hide independent Backend findings, but
         # never overlap it with an incompletely stopped/disposed App batch.
-        app_result = policy.json_data(policy.read_small(job.root / "diagnostics/app-result.json"))
-        policy.require(app_result.get("workers_stopped") is True and not job.producer.exists() and
-                       not (job.root / "app").exists(), "App workers/outputs must be disposed before Backend")
+        backend_prerequisites(job)
         docker_empty(child)
         policy.require(run_command(["/usr/bin/docker", "version"], source, child,
                        job.root / "diagnostics/docker-version.log", 30) == 0, "Actual Docker unavailable")
@@ -592,7 +625,9 @@ def main():
         job = runtime(env)
         os.umask(0o077)
         os.environ.clear()
-        os.environ.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(job.root / "app/home"), TMPDIR=str(job.root / "tmp"), LANG="C")
+        os.environ.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(job.root / "tmp"), TMPDIR=str(job.root / "tmp"), LANG="C")
+        home = "backend" if backend_only(job) else "app"
+        os.environ["HOME"] = str(job.root / home / "home")
         signal.signal(signal.SIGTERM, lambda *_: policy.require(False, "Interrupted"))
         if mode == "prepare":
             prepare(job, policy.json_data(env.get("KIRA_PROMOTION_SELECTION", "").encode()), env)

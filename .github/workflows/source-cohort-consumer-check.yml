@@ -30,12 +30,13 @@ env:
     {"artifact_id":12106899203,"artifact_name":"kira-owned-file-promotion-39051133291-1","artifact_sha256":"215bf9d4aa0c0db59fe2c781a30301f3d6861e77d74dca2430e973026c4f0307","artifact_size":2126103,"job_id":117449774086,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"0f5077fb530f1863997c71dd6d19cf7ba63bba35bc27608329d1a1fd9be53482","size":2600960},"producer":{"archive_sha256":"9a81ab0ed2befed10ea7c716fdd03d5d8346b74c171fd49df9b7128abff3439b","artifact_id":12107171679,"attestation_job_id":117446096346,"inventory_sha256":"628cd0381c9ca9f738cc589f42629d812408f54742da4099af134bbb3f59becf","producer_job_id":117442236053,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39048582890,"seal_sha256":"4355de0cd6691c6d0fce0ac15c991bab58ad93a0df092eb4a5ecc9e4b9e896e1","source_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","source_tree":"9f9869fa47de0a82e001be5de04bbb9d61c662ad","transport_sha256":"8b4e882930deb520a8fecdf85a3793974d735d8a2e1b1b235195806c6db9065e","version":"0.2.0","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","workflow_sha256":"ca05d0e76818a5788cf83c0666ddd0efcf22c6b09653867e7d0d976883c1f0df"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39051133291,"source_sha":"25c5b0e8c9faaf8e1b040c88cea740c87af8cefb","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
 
 # Check-only followups may select one affected platform via the pushed commit message.
-# [consumer apple] / [consumer linux]; absent or ambiguous tags run both. Omitted jobs are not PASS.
+# [consumer apple] / [consumer linux] / [consumer backend]; absent or ambiguous tags run both platforms.
+# Backend-only omits the unchanged App checkout/batch and Apple job; omitted checks are not PASS.
 jobs:
   linux:
     if: >-
       ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-          (!contains(github.event.head_commit.message, '[consumer apple]') || contains(github.event.head_commit.message, '[consumer linux]')) &&
+          (!contains(github.event.head_commit.message, '[consumer apple]') || contains(github.event.head_commit.message, '[consumer linux]') || contains(github.event.head_commit.message, '[consumer backend]')) &&
           github.repository == 'kira-manga/kira-source-engine' && github.repository_owner == 'kira-manga' &&
           github.repository_id == '1310736214' && github.run_attempt == 1 &&
           github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
@@ -60,6 +61,7 @@ jobs:
           KIRA_PROMOTION_SELECTION: ${{ inputs.selection || env.SELECTED_PROMOTION }}
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py prepare
       - name: Exact public App source candidate
+        if: ${{ steps.runtime.outputs.backend_only != 'true' }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
@@ -70,7 +72,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/Kira-backend
-          ref: 97a7b72d02c1116f79702adc1c605d4cff093d15
+          ref: 1172a9d9be4d1083bdaefa8fbe50ea0776834234
           path: backend
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
@@ -93,11 +95,12 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: App JVM contracts and Android compile plus native transport tests; capture stop dispose
+        if: ${{ steps.runtime.outputs.backend_only != 'true' }}
         id: app_batch
         timeout-minutes: 36
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
-      - name: Backend selected unit and real PostgreSQL parity-preview batch; capture stop dispose
-        if: ${{ !cancelled() && (steps.app_batch.outcome == 'success' || steps.app_batch.outcome == 'failure') }}
+      - name: Backend exact selected unit and real PostgreSQL batch; capture stop dispose
+        if: ${{ !cancelled() && ((steps.runtime.outputs.backend_only == 'true' && success()) || steps.app_batch.outcome == 'success' || steps.app_batch.outcome == 'failure') }}
         timeout-minutes: 18
         run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py backend
       - name: Always verify owned worker shutdown before evidence/disposal
@@ -121,7 +124,9 @@ jobs:
   apple:
     if: >-
       ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-          (!contains(github.event.head_commit.message, '[consumer linux]') || contains(github.event.head_commit.message, '[consumer apple]')) &&
+          ((!contains(github.event.head_commit.message, '[consumer linux]') && !contains(github.event.head_commit.message, '[consumer backend]')) ||
+           contains(github.event.head_commit.message, '[consumer apple]') ||
+           (contains(github.event.head_commit.message, '[consumer linux]') && contains(github.event.head_commit.message, '[consumer backend]'))) &&
           github.repository == 'kira-manga/kira-source-engine' && github.repository_owner == 'kira-manga' &&
           github.repository_id == '1310736214' && github.run_attempt == 1 &&
           github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
