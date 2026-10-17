@@ -159,8 +159,9 @@ class GenericSourceEngine(
                 } else {
                     scopes
                 }
+                val htmlImages = Extractor.isHtml(endpoint)
                 ordered.mapNotNull { scope ->
-                    pageDestination(scope, rootScope, chosenDir)?.let { destination ->
+                    pageDestination(scope, rootScope, chosenDir, htmlImages)?.let { destination ->
                         SourcePage(url = destination.url, headers = headerPolicy.headersFor(destination, pageHeaders))
                     }
                 }
@@ -729,10 +730,18 @@ class GenericSourceEngine(
         return absolutize(value, config.imageBase.ifEmpty { effectiveBaseUrl })
     }
 
-    /** Keep safe public images without source headers; omit unsafe references rather than repair them. */
-    private fun pageDestination(scope: ItemScope, rootScope: ItemScope, chosenDir: String): HttpDestination? {
+    /** Only extracted HTML path spaces are accommodated; URI and credential guards remain strict. */
+    private fun pageDestination(
+        scope: ItemScope,
+        rootScope: ItemScope,
+        chosenDir: String,
+        htmlImages: Boolean,
+    ): HttpDestination? {
         val spec = config.fields["page.image"] ?: return null
-        val value = resolveField(scope, "page.image", spec, rootScope, chosenDir, strict = true)
+        val extracted = resolveField(scope, "page.image", spec, rootScope, chosenDir, strict = true)
+        val value = if (htmlImages && spec.template.isEmpty()) {
+            HttpDestination.encodeExtractedImagePathSpaces(extracted)
+        } else extracted
         if (value.isEmpty() || !HttpDestination.isSafeImageReference(value)) return null
         val url = if (value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)) {
             value

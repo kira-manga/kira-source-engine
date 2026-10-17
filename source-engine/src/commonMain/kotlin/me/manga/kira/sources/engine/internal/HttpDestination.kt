@@ -70,6 +70,33 @@ internal class HttpDestination private constructor(
             }
         }
 
+        /**
+         * HTML page-image compatibility only: encode ASCII path spaces, not other URL components.
+         * This is not validation; callers must still apply [isSafeImageReference] and [parse].
+         */
+        fun encodeExtractedImagePathSpaces(value: String): String {
+            if (' ' !in value || value.first().isWhitespace() || value.last().isWhitespace()) return value
+            val suffixStart = value.indexOfAny(charArrayOf('?', '#')).takeIf { it >= 0 } ?: value.length
+            val authorityStart = when {
+                value.startsWith("https://", ignoreCase = true) -> "https://".length
+                value.startsWith("http://", ignoreCase = true) -> "http://".length
+                value.startsWith("//") -> 2
+                else -> {
+                    // Do not reinterpret or repair a malformed/unsupported scheme as a relative path.
+                    if (':' in value.substring(0, suffixStart).substringBefore('/')) return value
+                    0
+                }
+            }
+            val pathStart = if (authorityStart == 0) {
+                0
+            } else {
+                value.indexOf('/', startIndex = authorityStart).takeIf { it in authorityStart until suffixStart }
+                    ?: return value
+            }
+            return value.substring(0, pathStart) +
+                value.substring(pathStart, suffixStart).replace(" ", "%20") + value.substring(suffixStart)
+        }
+
         /** Extra trust entries are *bare* hosts, not endpoints or arbitrary-port authorities. */
         fun trustedHostOrigin(host: String): CredentialOrigin? {
             if (host.any { it in ":/?#" }) return null

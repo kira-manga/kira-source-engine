@@ -170,4 +170,58 @@ class HttpDestinationTest {
         val invalid = listOf("data:image/png,fixture", "javascript:fixture", "https:cdn.test/image", "//user@cdn.test/page", "page image.webp")
         for (reference in invalid) assertFalse(HttpDestination.isSafeImageReference(reference))
     }
+
+    @Test
+    fun extracted_image_path_spaces_preserve_every_other_component_and_encoded_byte() {
+        val cases = listOf(
+            "https://cdn.test/Series Name/1/Page 2.jpg?sig=a%2Fb+%20#part%20" to
+                "https://cdn.test/Series%20Name/1/Page%202.jpg?sig=a%2Fb+%20#part%20",
+            "HTTP://CDN.TEST:00080/a b/%2f/%2E%2e//c+d.webp" to "HTTP://CDN.TEST:00080/a%20b/%2f/%2E%2e//c+d.webp",
+            "//cdn.test/Series Name/a.webp" to "//cdn.test/Series%20Name/a.webp",
+            "/Series Name/a.webp" to "/Series%20Name/a.webp",
+            "Series Name/a.webp" to "Series%20Name/a.webp",
+            "../Series Name/a.webp" to "../Series%20Name/a.webp",
+            "/already%20encoded/%2520.jpg" to "/already%20encoded/%2520.jpg",
+            "https://cdn.test/no-spaces?a+b=%20#raw+fragment" to "https://cdn.test/no-spaces?a+b=%20#raw+fragment",
+        )
+        for ((raw, expected) in cases) {
+            val encoded = HttpDestination.encodeExtractedImagePathSpaces(raw)
+            assertEquals(expected, encoded)
+            assertTrue(HttpDestination.isSafeImageReference(encoded))
+        }
+    }
+
+    @Test
+    fun image_path_accommodation_does_not_repair_non_path_ambiguity_or_controls() {
+        assertEquals(
+            "https://bad host.test/a%20b?q=raw value#raw fragment",
+            HttpDestination.encodeExtractedImagePathSpaces("https://bad host.test/a b?q=raw value#raw fragment"),
+        )
+        val invalid = listOf(
+            "ht tps://cdn.test/a b", "https://cdn.test:44 3/a b", "https://user name@cdn.test/a b",
+            "https://bad host.test/a b", "https://%63dn.test/a b", "https://cdn.test\\@foreign.test/a b",
+            "https://cdn.test/a b?q=raw value", "https://cdn.test/a b#raw fragment",
+            "https://cdn.test?q=raw /value", "https://cdn.test#raw /fragment",
+            " //cdn.test/a b", "https://cdn.test/a b ", "https://cdn.test/a\tb",
+            "https://cdn.test/a b\r", "https://cdn.test/a b\nx", "https://cdn.test/a b\u0000x",
+            "https://cdn.test/a b\u007fx", "https://cdn.test/a b\u0085x", "https://cdn.test/a b\u00a0x",
+            "https://cdn.test/a b/%GG", "javascript:a b", "https:/cdn.test/a b",
+        )
+        for (raw in invalid) {
+            assertFalse(HttpDestination.isSafeImageReference(HttpDestination.encodeExtractedImagePathSpaces(raw)))
+        }
+        assertEquals("ht tps://cdn.test/a b", HttpDestination.encodeExtractedImagePathSpaces("ht tps://cdn.test/a b"))
+    }
+
+    @Test
+    fun raw_path_spaces_remain_invalid_for_general_urls_and_redirect_resolution() {
+        val raw = "https://cdn.test/Series Name/1.jpg"
+        assertNull(HttpDestination.parse(raw))
+        assertFalse(HttpDestination.isSafeImageReference(raw))
+        val base = assertNotNull(HttpDestination.parse("https://base.test/start"))
+        assertNull(base.resolve(raw))
+        assertNull(base.resolve("/Series Name/1.jpg"))
+        val encoded = HttpDestination.encodeExtractedImagePathSpaces(raw)
+        assertEquals("https://cdn.test/Series%20Name/1.jpg", assertNotNull(HttpDestination.parse(encoded)).url)
+    }
 }
