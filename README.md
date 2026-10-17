@@ -34,8 +34,10 @@ These commands are not evidence that release gates passed. CI selects Java21 and
 the existing SDK's API37 metadata and `android.jar`, accepting real `android-37` and
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
-publication components, Kotlin/API levels and the committed `VERSION_NAME=0.1.0-SNAPSHOT`
-default are unchanged. CI's candidate/noncandidate distinction is described below.
+publication components and Kotlin/API levels are unchanged. The committed
+`VERSION_NAME=0.2.0` is a **prospective engineering candidate, not a reserved or published
+version**; no tag or consumer pin changes with it. CI's candidate/noncandidate distinction
+is described below.
 
 ## Remote publication: current-source containment only
 
@@ -75,8 +77,9 @@ contract or consumer; the separate Stage B workflow recipe is described below. O
 
 After separate admission, `gradle/publication-gates.gradle.kts` has two local modes. Both
 require Gradle9.6.1, the actually applied KGP2.2.21 plugin in every module, Java21, offline
-operation, no configuration cache and a numeric local `VERSION_NAME` override; the committed
-SNAPSHOT default is deliberately ineligible. Missing SDK37/cached prerequisites are a stop,
+operation, no configuration cache and a canonical numeric version. An explicit `VERSION_NAME`
+override is only for separately admitted owned-local qualification; SNAPSHOT is ineligible.
+Missing SDK37/cached prerequisites are a stop,
 not permission to download them. A complete macOS
 producer and a fresh compatible promotion workspace are the initial qualification target.
 
@@ -175,14 +178,14 @@ trusted production/approval nor remote immutability, external-writer exclusion o
 acceptance. The credential-absence check uses the separately reviewed, pinned Gradle9.6.1
 internal presence API (never credential values); no internal/custom publisher is used.
 
-## Stage B: check-only CI today; candidate provenance recipe, not a publisher
+## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed version is still `0.1.0-SNAPSHOT`.** That path runs the ordinary `check`
-coverage and the small stdlib policy tests, reports **no candidate produced**, and skips
-export, candidate artifact upload and attestation. Diagnostics are still retained.
-A green check-only run is not a producer receipt.
-This source recipe does not authorize a CI dispatch, acquisition, new release version or
-publication, and does not claim a successful hosted macOS/Android/Apple producer run.
+**The committed prospective version is `0.2.0`, not reserved or published.** PRs remain
+check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
+produced** and skip export, candidate artifact upload and attestation. Diagnostics are
+still retained. A green PR is not a producer receipt. An exact eligible integration push
+can produce candidate bytes under the recipe below; this does not grant remote publication,
+prove unused registry coordinates, or claim a successful current-source package qualification.
 
 `ci.yml` accepts pushes and PRs targeting only
 `remediation/production-readiness-2026-09-04`. There is no main/tag/dispatch/alternate-ref
@@ -193,22 +196,29 @@ workflow SHA/ref, and one canonical `X.Y.Z` in **committed** `gradle.properties`
 escaped or ambiguous properties, prereleases and ambient version/JVM overrides refuse.
 No tag, CLI argument or environment value supplies a candidate version.
 
-For an eventually owner-approved canonical commit, the recipe is deliberately linear:
+For an admitted canonical integration commit, the candidate-only recipe is deliberately linear:
 
 1. Bind the full committed source SHA/tree, workflow bytes and every tracked file/mode.
    Reject dirty/deleted inputs, staged changes and unexpected additions, including ignored
    build scripts. Only the explicit root `.gradle`, `.kotlin`, `build` and three module
    `build` output directories are exempt **after** fresh-workspace admission, not arbitrary
    `**/build` paths. Recheck at the phase boundary, after export and during archive creation.
-2. In **one macOS workspace**, run one ordinary online `check` invocation together with the
-   thirty native POM/GMM generator roots (three modules × two generators × five publications).
+2. In **one macOS workspace**, create and boot one owned simulator using an already installed
+   available iOS runtime (bounded420s readiness; no runtime download). The same online `check`
+   invocation includes all three unfiltered `iosSimulatorArm64Test` task roots with that exact
+   `--device` UUID and, only for candidates, thirty native POM/GMM generator roots
+   (three modules × two generators × five publications).
    This invocation has no `kiraPublicationMode`. It is followed, on success only, by the same
    workspace's offline `:exportKiraPublicationBytes` with explicit export mode. No Maven-local,
    second producer, target sharding, arbitrary exclusions, test rerun in export or promotion.
 3. Use fresh job-owned Gradle/Native homes, no dependency/project-output cache restore, no
    build/configuration cache, one worker, in-process Kotlin compilation, bounded heap and a
    job timeout. Stop the owned Gradle workers between phases and after export. Hosted tool
-   and resource admission remains separate; `--offline` is not a network sandbox and cache
+   and resource admission remains separate. After production's Gradle stop, immediately shut down
+   and delete the exact owned simulator, including after failed production. Final always-cleanup
+   retains reservation-based recovery for partial setup/deletion, verifies absence, and preserves
+   its result alongside existing evidence.
+   `--offline` is not a network sandbox and cache
    presence is not provenance. Descriptor execution during export remains allowed; this is
    not the separate promotion's no-regeneration proof.
 4. Validate the existing exact bundle and its source/model/seal relationships, then create
@@ -429,7 +439,8 @@ point. Reviewer membership, self-review prevention, administrator bypass and act
 are **not proved**; missing bypass metadata is not false. The policy list is read once:
 the last environment read neither revalidates nor freezes that list. Matching observations
 are not an atomic snapshot, reservation, authority or release permission. StageC's unconditional
-hold, disabled publisher, SNAPSHOT version, all-writer/registry and consumer holds remain.
+hold, disabled publisher, all-writer/registry and consumer holds remain. The separately selected
+prospective candidate version is not a release or registry reservation.
 Focused synthetic tests are `test_github_publication_receipts.EnvironmentConfigurationAcquisitionTests`;
 their source is not a live API or protection qualification.
 

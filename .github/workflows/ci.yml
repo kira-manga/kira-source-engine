@@ -21,7 +21,8 @@ jobs:
     # Same hosted label as the qualified source-bootstrap check; admission below
     # requires actual Darwin/ARM64, never an Intel fallback or SDK alias/install.
     runs-on: macos-latest
-    timeout-minutes: 55
+    # Preserve existing phase bounds plus headroom for the owned cold simulator.
+    timeout-minutes: 65
     outputs:
       candidate: ${{ steps.eligibility.outputs.candidate }}
       version: ${{ steps.eligibility.outputs.version }}
@@ -102,6 +103,44 @@ jobs:
         id: eligibility
         run: python3 -B .github/scripts/publication_policy.py ci-start --state "$KIRA_CI_ROOT/before.json"
 
+      - name: Create one owned simulator from an already installed iOS runtime
+        id: simulator
+        timeout-minutes: 9
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ['KIRA_CI_ROOT'])
+          owner = dict(repository=os.environ['GITHUB_REPOSITORY'], run_id=os.environ['GITHUB_RUN_ID'],
+                       run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha=os.environ['GITHUB_SHA'], root=str(root))
+          assert not root.is_symlink() and json.loads((root / 'owner.json').read_text()) == owner
+          devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=30))['devices']
+          choices = [(runtime, device) for runtime, group in devices.items()
+                     if re.fullmatch(r'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+', runtime)
+                     for device in group if device.get('isAvailable') and device.get('deviceTypeIdentifier', '').startswith('com.apple.CoreSimulator.SimDeviceType.iPhone-')]
+          assert choices, 'No installed available iOS/iPhone simulator; no runtime download or target substitution'
+          runtime, device = max(choices, key=lambda pair: tuple(map(int, pair[0].split('.iOS-')[1].split('-'))))
+          name = 'kira-ci-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          assert all(d['name'] != name for group in devices.values() for d in group), 'Owned simulator name already exists'
+          reservation = {'name': name, 'runtime': runtime, 'device_type': device['deviceTypeIdentifier']}
+          # Reserve before create; a partial create still has an exact cleanup identity.
+          with (root / 'simulator.json').open('x') as f:
+              json.dump(reservation, f)
+          udid = subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'create', name, reservation['device_type'], runtime], text=True, timeout=30).strip()
+          assert re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', udid), 'Unexpected simulator identifier'
+          reservation['udid'] = udid
+          # Preserve the name/runtime/type reservation if UUID recording is interrupted.
+          pending = root / 'simulator-created.json'
+          with pending.open('x') as f:
+              json.dump(reservation, f)
+          pending.replace(root / 'simulator.json')
+          (root / 'diagnostics/simulator.json').write_text(json.dumps(reservation, indent=2) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('KIRA_CI_SIMULATOR=' + udid + '\n')
+          subprocess.run(['/usr/bin/xcrun', 'simctl', 'boot', udid], check=True, timeout=30)
+          subprocess.run(['/usr/bin/xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True, timeout=420)
+          PY
+
       # One producer workspace/invocation. No Maven-local, mode or version override here.
       - name: Check all targets and, only if eligible, produce all native descriptors
         id: build
@@ -112,6 +151,11 @@ jobs:
         run: |
           set -euo pipefail
           roots=(check)
+          # These are also reached by check; task-scoped options select one owned
+          # ready device, not a second test invocation or a reduced test filter.
+          for module in source-contract source-engine source-testkit; do
+            roots+=(":${module}:iosSimulatorArm64Test" --device "$KIRA_CI_SIMULATOR")
+          done
           if [[ "$ELIGIBLE" == true ]]; then
             for module in source-contract source-engine source-testkit; do
               for generator in generatePomFileFor generateMetadataFileFor; do
@@ -142,6 +186,36 @@ jobs:
           done
           [[ ! -d "$GRADLE_USER_HOME/daemon" ]] || { echo '::error::Owned daemon registry has no installed Gradle launcher'; exit 1; }
           echo 'No installed owned Gradle runtime; no stop/bootstrap needed.'
+
+      - name: Release the owned simulator immediately after production
+        id: simulator_disposal
+        if: ${{ always() && steps.simulator.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY' 2>&1 | tee "$KIRA_CI_ROOT/diagnostics/simulator-disposal.log"
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ['KIRA_CI_ROOT'])
+          assert root == pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True) / ('kira-ci-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          owner = dict(repository=os.environ['GITHUB_REPOSITORY'], run_id=os.environ['GITHUB_RUN_ID'],
+                       run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha=os.environ['GITHUB_SHA'], root=str(root))
+          assert not root.is_symlink() and json.loads((root / 'owner.json').read_text()) == owner
+          reservation = json.loads((root / 'simulator.json').read_text())
+          udid = os.environ['KIRA_CI_SIMULATOR']
+          assert reservation['name'] == root.name and reservation['udid'] == udid
+          assert re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', udid)
+          failed = False
+          for command in ('shutdown', 'delete'):
+              try:
+                  subprocess.run(['/usr/bin/xcrun', 'simctl', command, udid], check=True, timeout=30)
+              except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                  print('Owned simulator ' + command + ' failed; remaining cleanup is still attempted.')
+                  failed = True
+          if failed:
+              raise SystemExit(1)
+          print('Owned simulator shutdown/delete completed; final reservation cleanup verifies absence.')
+          PY
 
       - name: Compare committed inputs at the phase boundary
         run: python3 -B .github/scripts/publication_policy.py ci-check --state "$KIRA_CI_ROOT/before.json"
@@ -243,6 +317,7 @@ jobs:
           BOOTSTRAP_STARTED: ${{ steps.bootstrap.outputs.started }}
           BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome }}
           ADMISSION_OUTCOME: ${{ steps.eligibility.outcome }}
+          SIMULATOR_OUTCOME: ${{ steps.simulator.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
           EXPORT_OUTCOME: ${{ steps.export.outcome }}
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
@@ -254,8 +329,8 @@ jobs:
           [[ ! -L "$root/diagnostics" ]]
           mkdir -p "$root/diagnostics"
           printf 'ready=true\n' >> "$GITHUB_OUTPUT"
-          printf 'java=%s\nbootstrap=%s\nadmission=%s\nbuild=%s\nexport=%s\narchive_upload=%s\n' \
-            "$JAVA_OUTCOME" "$BOOTSTRAP_OUTCOME" "$ADMISSION_OUTCOME" "$BUILD_OUTCOME" "$EXPORT_OUTCOME" "$UPLOAD_OUTCOME" \
+          printf 'java=%s\nbootstrap=%s\nadmission=%s\nsimulator=%s\nbuild=%s\nexport=%s\narchive_upload=%s\n' \
+            "$JAVA_OUTCOME" "$BOOTSTRAP_OUTCOME" "$ADMISSION_OUTCOME" "$SIMULATOR_OUTCOME" "$BUILD_OUTCOME" "$EXPORT_OUTCOME" "$UPLOAD_OUTCOME" \
             > "$root/diagnostics/phase-outcomes.txt"
           status=0
           stop_owned_gradle() {
@@ -310,6 +385,43 @@ jobs:
           elif [[ "$BOOTSTRAP_STARTED" == true ]]; then
             echo '::error::Bootstrap cleanup deferred: owned Gradle shutdown failed; not reported clean.'
           fi
+          # Resolve only this run's reserved device, including interruption between
+          # create and UUID recording. A failure does not skip the evidence paths below.
+          if ! python3 -B - <<'PY' 2>&1 | tee "$root/diagnostics/simulator-cleanup.log"
+          import json, os, pathlib, re, stat, subprocess
+          root = pathlib.Path(os.environ['OWNED_ROOT'])
+          owner = dict(repository=os.environ['GITHUB_REPOSITORY'], run_id=os.environ['GITHUB_RUN_ID'],
+                       run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha=os.environ['GITHUB_SHA'], root=str(root))
+          assert not root.is_symlink() and json.loads((root / 'owner.json').read_text()) == owner
+          reservation_file = root / 'simulator.json'
+          if reservation_file.exists() or reservation_file.is_symlink():
+              info = reservation_file.lstat()
+              assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 4096
+              reservation = json.loads(reservation_file.read_bytes())
+              assert set(reservation) in ({'name', 'runtime', 'device_type'}, {'name', 'runtime', 'device_type', 'udid'})
+              assert reservation['name'] == root.name
+              assert re.fullmatch(r'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+', reservation['runtime'])
+              assert reservation['device_type'].startswith('com.apple.CoreSimulator.SimDeviceType.iPhone-')
+              (root / 'diagnostics/simulator.json').write_text(json.dumps(reservation, indent=2) + '\n')
+              devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=30))['devices']
+              matches = [d for d in devices.get(reservation['runtime'], []) if d['name'] == reservation['name']]
+              assert len(matches) <= 1, 'Ambiguous owned simulator identity'
+              shutdown_failed = False
+              for device in matches:
+                  assert device['deviceTypeIdentifier'] == reservation['device_type']
+                  assert 'udid' not in reservation or device['udid'] == reservation['udid']
+                  if device['state'] != 'Shutdown':
+                      try:
+                          subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', device['udid']], check=True, timeout=30)
+                      except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                          shutdown_failed = True  # Still attempt exact owned deletion; preserve failure.
+                  subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', device['udid']], check=True, timeout=30)
+              remaining = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=30))['devices']
+              assert all(d['name'] != reservation['name'] for group in remaining.values() for d in group), 'Owned simulator remains'
+              assert not shutdown_failed, 'Owned simulator shutdown failed; later deletion was verified'
+          print('No simulator was reserved, or the exact owned simulator is absent after cleanup.')
+          PY
+          then status=1; fi
           for receipt in before.json upload-receipt.json; do
             if [[ -f "$root/$receipt" && ! -L "$root/$receipt" ]]; then
               if ! cp "$root/$receipt" "$root/diagnostics/$receipt"; then status=1; fi
