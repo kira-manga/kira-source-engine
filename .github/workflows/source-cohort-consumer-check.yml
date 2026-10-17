@@ -1,0 +1,190 @@
+name: Exact owned source cohort consumers (check only)
+
+on:
+  push:
+    branches: [remediation/priority-sources-20261017]
+    paths:
+      - .github/workflows/source-cohort-consumer-check.yml
+      - .github/scripts/source_cohort_consumer.py
+      - .github/scripts/backend-source-cohort.init.gradle
+      - .github/scripts/test_source_cohort_consumer.py
+  workflow_dispatch:
+    inputs:
+      selection:
+        description: Exact independently selected successful promotion tuple (optional; committed selection is the default)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kira-exact-owned-source-consumers
+  cancel-in-progress: false
+
+env:
+  # Genuine completed promotion39033708659, independently selected after success.
+  # Original producer647 executions are not replayed; no packages token is needed.
+  SELECTED_PROMOTION: >-
+    {"artifact_id":12100768388,"artifact_name":"kira-owned-file-promotion-39033708659-1","artifact_sha256":"3716f1a7daee663757b5f0e4dc73e919f0a61edffaf2fb8c15131dbfb5a6f7b9","artifact_size":2116079,"job_id":117399208609,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"abed82966db185e24d3360b37071f56867f8d1fc1f560e91a4b601ad80a1499d","size":2590720},"producer":{"archive_sha256":"c569c370150f6a66726f163f53ad9cfdf7c4ba1aff1da6129a6467183259eee7","artifact_id":12098874819,"attestation_job_id":117387250101,"inventory_sha256":"635553b54619b37ac56bf13a368a6adeede610c54767c3b576d72b7b3ab214a8","producer_job_id":117383746484,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39028369302,"seal_sha256":"43376f7f214de60b5e85d00d6191ebf49d16706f164ad7b04994cf27e64d6d9c","source_sha":"e614df497d0a598feb097fd6d18d67051fd3e531","source_tree":"5c156f9a7b68c64dc3ef7687a0b7ae85bb99ee3a","transport_sha256":"224c4c67e591aee10c8f68fb8c21c2e71c7fa98451bd0fe36f2c9ab571c26322","version":"0.2.0","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"e614df497d0a598feb097fd6d18d67051fd3e531","workflow_sha256":"e38cba5610b19943e4e4d9d4b71a2574b21e2ad780b1e598cc486df3166d74a0"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39033708659,"source_sha":"41e9d67e8fd8b363b501da28d3f3e107ebdefa99","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
+
+jobs:
+  linux:
+    if: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_owner == 'kira-manga' &&
+          github.repository_id == '1310736214' && github.run_attempt == 1 &&
+          github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/source-cohort-consumer-check.yml@refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_sha == github.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Exact reviewed Engine control
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - name: Reserve fresh owned consumer locations
+        id: runtime
+        env:
+          KIRA_PROMOTION_SELECTION: ${{ inputs.selection || env.SELECTED_PROMOTION }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py prepare
+      - name: Exact public App source candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: kira-manga/kira-app
+          ref: 0fc8ce820395f89d84770b802c73875deaf49f86
+          path: app
+          persist-credentials: false
+      - name: Exact public Backend source candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: kira-manga/Kira-backend
+          ref: 97a7b72d02c1116f79702adc1c605d4cff093d15
+          path: backend
+          persist-credentials: false
+      - name: Download Engine's own immutable selected promotion artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+      - name: Fresh successful-promotion receipt and complete original byte intake
+        timeout-minutes: 3
+        env:
+          KIRA_INTAKE_READ_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py intake
+      - name: Supported Java21 consumer toolchain
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: App JVM contracts and Android compile plus native transport tests; capture stop dispose
+        timeout-minutes: 36
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
+      - name: Backend selected unit and real PostgreSQL parity-preview batch; capture stop dispose
+        timeout-minutes: 18
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py backend
+      - name: Always verify owned worker shutdown before evidence/disposal
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 8
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py finalize
+      - name: Retain bounded Linux consumer source byte and test evidence
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-source-consumer-linux-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/diagnostics/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
+      - name: Dispose only this job's verified owned roots
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 2
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py dispose
+
+  apple:
+    if: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_owner == 'kira-manga' &&
+          github.repository_id == '1310736214' && github.run_attempt == 1 &&
+          github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/source-cohort-consumer-check.yml@refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_sha == github.sha }}
+    runs-on: macos-latest
+    timeout-minutes: 92
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Exact reviewed Engine control
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - name: Reserve fresh owned consumer locations
+        id: runtime
+        env:
+          KIRA_PROMOTION_SELECTION: ${{ inputs.selection || env.SELECTED_PROMOTION }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py prepare
+      - name: Exact public App source candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: kira-manga/kira-app
+          ref: 0fc8ce820395f89d84770b802c73875deaf49f86
+          path: app
+          persist-credentials: false
+      - name: Download Engine's own immutable selected promotion artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+      - name: Fresh successful-promotion receipt and complete original byte intake
+        timeout-minutes: 3
+        env:
+          KIRA_INTAKE_READ_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py intake
+      - name: Supported Java21 consumer toolchain
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: App authenticated Kotlin2.4 libffi bootstrap using actual Engine owner context
+        timeout-minutes: 15
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py bootstrap
+      - name: Both App Apple compiles plus Darwin transport tests; capture stop dispose
+        timeout-minutes: 65
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py app
+      - name: Always verify owned shutdown and remove only owned bootstrap
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 8
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py finalize
+      - name: Retain bounded Apple consumer source binary and bootstrap evidence
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-source-consumer-apple-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/diagnostics/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
+      - name: Dispose only this job's verified owned roots
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 2
+        run: /usr/bin/python3 -B -E -s .github/scripts/source_cohort_consumer.py dispose
