@@ -41,10 +41,14 @@ default are unchanged. CI's candidate/noncandidate distinction is described belo
 
 **Remote package publication is disabled in this source revision. Engine6 remains open.**
 
-- `publish.yml` has no tag trigger. Its only manual-dispatch job has empty permissions,
-  no checkout/build/credentials/environment/activation input, and always fails with an
-  explicit disabled notice. Dispatching this same workflow source from another ref does
-  not activate publication.
+- `publish.yml` has no tag trigger. Its held manual workflow admits only this repository's
+  numeric identity and the campaign integration ref, with read-only permissions. Separate
+  control/producer checkouts and an explicit policy-read secret support fresh intake before
+  and after the selected native environment boundary. The trusted policy is currently
+  unconfigured, so it refuses before HTTP or environment selection; even after configuration,
+  the caller refuses before executing the constructed native publication command. No package
+  write permission or write credential is supplied. This is not exclusion of other workflows
+  or out-of-band writers, and does not remove the independent Gradle publication holds.
 - The three module builds no longer configure a remote publishing repository or its
   credentials. Their `maven-publish` plugins and local publication model are retained;
   the former GitHub-destination publication tasks are not configured by this source.

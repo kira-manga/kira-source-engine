@@ -1,18 +1,207 @@
-name: Package publication disabled (Engine6 containment)
+name: Held publisher intake (Maven publication disabled)
+
+# Remote package publication is disabled by Engine6 current-source containment.
+# No package-write permission, write credential, Gradle execution or approval bypass.
+# The control caller is initially UNCONFIGURED and cannot select/create an environment.
 
 on:
   workflow_dispatch:
+    inputs:
+      selection:
+        description: Exact producer tuple, source_branch_tip, tag_object and two parity references (no policy or credentials)
+        required: true
+        type: string
 
-permissions: {}
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+concurrency:
+  group: engine-held-publisher-intake
+  cancel-in-progress: false # This is NOT exclusion of other or out-of-band writers.
 
 jobs:
-  refuse-publication:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 1
-    steps:
-      - name: Refuse remote package publication
+  preflight:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
+          github.repository_id == '1310736214' && github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' &&
+          github.repository_owner == 'kira-manga' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
         shell: bash
+        working-directory: control
+    outputs:
+      environment: ${{ steps.intake.outputs.environment }}
+      environment_id: ${{ steps.intake.outputs.environment_id }}
+      record_sha256: ${{ steps.intake.outputs.record_sha256 }}
+      record_artifact_id: ${{ steps.record.outputs.artifact-id }}
+    steps:
+      - name: Check out trusted control source, never producer code as the caller
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Require independently selected policy and prepare this exact publisher invocation
+        id: runtime
+        env:
+          KIRA_PUBLISHER_REQUEST: ${{ inputs.selection }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py prepare-preflight
+
+      - name: Check out the exact producer bytes with complete lineage
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: producer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download only the selected immutable producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.producer_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+
+      - name: Acquire only the pinned public Darwin native verifier distribution
+        timeout-minutes: 2
+        env:
+          PRIVATE_ROOT: ${{ steps.runtime.outputs.root }}
         run: |
-          printf '%s\n' '::error::Remote package publication is disabled by Engine6 current-source containment.'
-          printf '%s\n' 'No checkout, build or upload is performed. See README.md for the open release gates.'
-          exit 1
+          set -euo pipefail
+          umask 077
+          asset="$PRIVATE_ROOT/gh_2.100.0_macOS_arm64.zip"
+          [[ ! -e "$asset" && ! -L "$asset" ]]
+          /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 2 \
+            --noproxy '*' --proxy '' --proto '=https' --proto-redir '=https' \
+            --max-time 60 --max-filesize 67108864 --output "$asset" \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_macOS_arm64.zip
+          # Existing native_verify authenticates these exact bytes before extracting/executing.
+
+      - name: Real fresh native intake and live publisher preflight
+        id: intake
+        timeout-minutes: 10
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py preflight
+
+      - name: Retain the bounded exact comparison for this run, not an approval receipt
+        id: record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-publisher-preflight-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/comparison.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Always remove only this preflight's owned inputs
+        if: ${{ always() }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py cleanup-preflight
+
+  protected-recheck:
+    needs: preflight
+    if: >-
+      ${{ needs.preflight.result == 'success' && needs.preflight.outputs.environment != '' &&
+          needs.preflight.outputs.environment_id != '' && needs.preflight.outputs.record_sha256 != '' &&
+          needs.preflight.outputs.record_artifact_id != '' }}
+    # Only successful preflight against the trusted control policy may produce this name.
+    # Never use inputs.selection or API-discovered defaults as an environment selector.
+    environment:
+      name: ${{ needs.preflight.outputs.environment }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Check out the same trusted control source in a new job
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Prepare fresh post-boundary inputs without accepting an approval Boolean
+        id: runtime
+        env:
+          KIRA_PUBLISHER_REQUEST: ${{ inputs.selection }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py prepare-recheck
+
+      - name: Check out the same producer without generated roots or restored caches
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: producer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reacquire the original selected producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.producer_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+
+      - name: Retrieve only this invocation's pinned comparison artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ needs.preflight.outputs.record_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/handoff
+          merge-multiple: true
+
+      - name: Reacquire the same pinned public Darwin verifier, never a PATH binary
+        timeout-minutes: 2
+        env:
+          PRIVATE_ROOT: ${{ steps.runtime.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          asset="$PRIVATE_ROOT/gh_2.100.0_macOS_arm64.zip"
+          [[ ! -e "$asset" && ! -L "$asset" ]]
+          /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 2 \
+            --noproxy '*' --proxy '' --proto '=https' --proto-redir '=https' \
+            --max-time 60 --max-filesize 67108864 --output "$asset" \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_macOS_arm64.zip
+
+      - name: Real fresh recheck, exact raw staging, then refuse missing writer authority
+        timeout-minutes: 10
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+          KIRA_RECORD_SHA256: ${{ needs.preflight.outputs.record_sha256 }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py recheck
+
+      - name: Retain bounded held-command diagnostics, not an executed native graph
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-publisher-held-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/diagnostics/*.json
+          if-no-files-found: ignore
+          overwrite: false
+          retention-days: 1
+
+      - name: Always remove only owned intake and staged producer input
+        if: ${{ always() }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py cleanup-recheck

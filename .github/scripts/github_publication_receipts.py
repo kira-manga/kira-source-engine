@@ -411,3 +411,56 @@ def acquire_official_receipts(expected, token=None):
     except Exception:
         # No token, response content, provider message, URL or nested cause crosses the boundary.
         raise policy.Refusal("Official receipt acquisition failed") from None
+
+
+def acquire_current_publisher(context, *, token=None):
+    """Resolve only this actual invocation's numeric workflow ID, never approval/policy."""
+    try:
+        fields = {"GITHUB_REPOSITORY": "repository", "GITHUB_REPOSITORY_ID": "repository_id",
+                  "GITHUB_REF": "ref", "GITHUB_WORKFLOW_REF": "workflow_ref",
+                  "GITHUB_WORKFLOW_SHA": "workflow_sha", "GITHUB_SHA": "source_sha",
+                  "GITHUB_RUN_ID": "run_id", "GITHUB_RUN_ATTEMPT": "run_attempt"}
+        policy.require(type(context) is dict and set(context) == set(fields) | {"GITHUB_EVENT_NAME"}
+                       and all(type(v) is str for v in context.values()), "Actual publisher context required")
+        context = context.copy()
+        policy.require(context["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+                       and context["GITHUB_REPOSITORY"] == policy.REPOSITORY
+                       and context["GITHUB_REF"].startswith("refs/heads/"), "Publisher context refused")
+        _branch_name(context["GITHUB_REF"][len("refs/heads/"):])
+        policy.require(context["GITHUB_WORKFLOW_REF"] == policy.REPOSITORY + "/" + PUBLISHER_WORKFLOW + "@" + context["GITHUB_REF"]
+                       and policy.hex_value(context["GITHUB_SHA"], 40)
+                       and context["GITHUB_WORKFLOW_SHA"] == context["GITHUB_SHA"]
+                       and context["GITHUB_RUN_ATTEMPT"] == "1", "Publisher workflow/attempt refused")
+        value = {field: context[key] for key, field in fields.items()}
+        for key in ("repository_id", "run_id", "run_attempt"):
+            policy.require(re.fullmatch(r"[1-9][0-9]{0,18}", value[key]) is not None, "Publisher numeric identity refused")
+            value[key] = _selected_id(int(value[key]))
+        _validate_read_token(token)
+        observed = _get_json("/repos/" + policy.REPOSITORY + "/actions/runs/" + str(value["run_id"]) + "/attempts/1", token)
+        value["workflow_id"] = _selected_id(observed.get("workflow_id"))
+        _publisher_run(observed, value)
+        return value
+    except Exception:
+        raise policy.Refusal("Current publisher acquisition refused") from None
+
+
+def acquire_attestation_bundle(expected, *, token=None):
+    """Transport one inline official bundle; the caller MUST still run native verification.
+
+    Ignore response URLs: only the already selected archive subject drives the fixed GET.
+    No decoded predicate, supplied PASS, pagination, newest-match selection or fallback.
+    """
+    try:
+        expected = validated_request(expected, token)
+        path = "/repos/" + policy.REPOSITORY + "/attestations/sha256:" + expected["archive_sha256"] + "?per_page=1&page=1"
+        response = _get_json(path, token)
+        entries = response.get("attestations")
+        policy.require(type(entries) is list and len(entries) == 1 and type(entries[0]) is dict,
+                       "Exactly one inline attestation bundle required")
+        bundle = entries[0].get("bundle")
+        policy.require(type(bundle) is dict and bool(bundle), "Inline attestation bundle required")
+        data = json.dumps(bundle, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        policy.require(len(data) <= policy.MAX_META, "Attestation bundle bound exceeded")
+        return data
+    except Exception:
+        raise policy.Refusal("Attestation bundle acquisition refused") from None

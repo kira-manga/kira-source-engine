@@ -28,6 +28,14 @@ def publisher_selection():
     return publisher, protection
 
 
+def publisher_context():
+    publisher, _ = publisher_selection()
+    fields = {"GITHUB_REPOSITORY": "repository", "GITHUB_REPOSITORY_ID": "repository_id",
+              "GITHUB_REF": "ref", "GITHUB_WORKFLOW_REF": "workflow_ref", "GITHUB_WORKFLOW_SHA": "workflow_sha",
+              "GITHUB_SHA": "source_sha", "GITHUB_RUN_ID": "run_id", "GITHUB_RUN_ATTEMPT": "run_attempt"}
+    return {key: str(publisher[field]) for key, field in fields.items()} | {"GITHUB_EVENT_NAME": "workflow_dispatch"}
+
+
 def publisher_policy_values(publisher=None, protection=None):
     publisher, protection = (publisher, protection) if publisher is not None else publisher_selection()
     branch = publisher["ref"][len("refs/heads/"):]
@@ -563,6 +571,76 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 8)
         self.assertTrue(all("Authorization" not in kwargs["headers"] for _, kwargs in self.requests))
         self.assertClosed()
+
+
+class WorkflowAcquisitionTests(unittest.TestCase):
+    setUp = ReceiptAcquisitionTests.setUp
+    connect = ReceiptAcquisitionTests.connect
+    assertClosed = ReceiptAcquisitionTests.assertClosed
+
+    def response(self, value, **kwargs):
+        for response in self.responses:
+            if not response.closed:
+                response.close()
+        self.responses = [Response(value, **kwargs)]
+        self.addCleanup(self.responses[0].close)
+        self.connections.clear()
+        self.requests.clear()
+
+    def test_current_invocation_resolves_only_workflow_id_not_approval(self):
+        self.response(publisher_policy_values()[0])
+        token = "synthetic_READ_token"
+        self.assertEqual(r.acquire_current_publisher(publisher_context(), token=token), publisher_selection()[0])
+        self.assertEqual([args for args, _ in self.requests], [
+            ("GET", "/repos/kira-manga/kira-source-engine/actions/runs/61/attempts/1")])
+        self.assertEqual(self.requests[0][1]["headers"]["Authorization"], "Bearer " + token)
+        self.assertClosed()
+
+    def test_context_and_response_mismatch_refuse_without_discovering_other_runs(self):
+        cases = [{"GITHUB_RUN_ID": "061"}, {"GITHUB_RUN_ATTEMPT": "2"}, {"GITHUB_REPOSITORY_ID": True},
+                 {"GITHUB_EVENT_NAME": "push"}, {"GITHUB_WORKFLOW_SHA": "0" * 40}, {"approved": "true"}]
+        for change in cases:
+            with self.subTest(context=change), self.assertRaisesRegex(p.Refusal, "^Current publisher acquisition refused$"):
+                r.acquire_current_publisher(publisher_context() | change)
+        self.factory.assert_not_called()
+        for change in ({"id": 62}, {"workflow_id": True}, {"run_attempt": 2}, {"head_sha": "0" * 40},
+                       {"event": "push"}, {"status": "completed", "conclusion": "success"},
+                       {"head_repository": {"id": 74, "full_name": p.REPOSITORY}}):
+            self.response(publisher_policy_values()[0] | change)
+            with self.subTest(response=change), self.assertRaisesRegex(p.Refusal, "^Current publisher acquisition refused$"):
+                r.acquire_current_publisher(publisher_context())
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
+
+    def test_inline_bundle_fixed_subject_get_is_not_native_verification(self):
+        bundle = {"fixture": "UNVERIFIED synthetic bundle", "nested": {"b": 2, "a": 1}}
+        self.response({"attestations": [{"bundle": bundle, "bundle_url": "https://untrusted.invalid/ignored"}]})
+        with mock.patch.object(p, "native_verify") as native:
+            result = r.acquire_attestation_bundle(expected(), token="synthetic_READ_token")
+        self.assertEqual(json.loads(result), bundle)
+        self.assertNotIn(b"synthetic_READ_token", result)
+        self.assertEqual([args for args, _ in self.requests], [
+            ("GET", "/repos/kira-manga/kira-source-engine/attestations/sha256:" + "d" * 64 + "?per_page=1&page=1")])
+        native.assert_not_called()
+        self.assertClosed()
+
+    def test_ambiguous_missing_or_redirected_bundle_refuses_content_free(self):
+        cases = [{}, {"attestations": []}, {"attestations": [{"bundle": {}}]},
+                 {"attestations": [{"bundle_url": "https://untrusted.invalid/private"}]},
+                 {"attestations": [{"bundle": {"a": 1}}] * 2}, {"attestations": [{"bundle": "not-object"}]}]
+        for value in cases:
+            self.response(value)
+            with self.subTest(value=value), self.assertRaisesRegex(p.Refusal, "^Attestation bundle acquisition refused$"):
+                r.acquire_attestation_bundle(expected())
+            self.assertClosed()
+        for status, headers in ((302, {"Location": "https://untrusted.invalid"}),
+                                (200, {"Link": '<https://untrusted.invalid>; rel="next"'}),
+                                (200, {"Content-Length": str(p.MAX_META + 1)})):
+            self.response({}, status=status, headers=headers)
+            with self.assertRaisesRegex(p.Refusal, "^Attestation bundle acquisition refused$"):
+                r.acquire_attestation_bundle(expected())
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
 
 
 if __name__ == "__main__":
