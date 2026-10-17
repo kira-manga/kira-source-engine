@@ -812,6 +812,9 @@ class NativeAdapterAndIntakeTests(OwnedFixture):
             self.assertIn("--deny-self-hosted-runners", command)
             self.assertTrue(execute.call_args.kwargs["check"])
             self.assertNotIn("GH_TOKEN", execute.call_args.kwargs["env"])
+            self.assertEqual(execute.call_args.kwargs["env"]["XDG_CONFIG_HOME"],
+                             str(Path(command[0]).parent / "config"))
+            self.assertFalse(Path(command[0]).parent.exists())
             execute.return_value = subprocess.CompletedProcess([], 0, b'{"verified":true}', b"")
             with self.assertRaises(p.Refusal):
                 p.native_verify(asset, bundle, [subject], expected())
@@ -915,7 +918,12 @@ class NativeDarwinAdapterTests(OwnedFixture):
             local_bundle = binary.parent / "bundle.json"
             self.assertEqual(binary.read_bytes(), self.payload)
             self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o700)
-            self.assertEqual({item.name for item in binary.parent.iterdir()}, {"gh", "bundle.json"})
+            self.assertEqual({item.name for item in binary.parent.iterdir()}, {"gh", "bundle.json", "config"})
+            config = binary.parent / "config"
+            self.assertTrue(config.is_dir())
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o700)
+            (config / "gh").mkdir(exist_ok=True)
+            (config / "gh" / "config.yml").write_text("{}\n", encoding="utf-8")
             self.assertEqual(local_bundle.read_bytes(), self.bundle.read_bytes())
             self.assertEqual(command[1:], ["attestation", "verify", str(self.subjects[len(commands)]),
                 "--bundle", str(local_bundle), "--hostname", "github.com", "--repo", p.REPOSITORY,
@@ -923,7 +931,7 @@ class NativeDarwinAdapterTests(OwnedFixture):
                 "--cert-oidc-issuer", p.ISSUER, "--signer-digest", SHA, "--source-ref", p.REF,
                 "--source-digest", SHA, "--deny-self-hosted-runners"])
             self.assertEqual(kwargs, {"env": {"PATH": os.defpath, "HOME": str(binary.parent),
-                "XDG_CONFIG_HOME": str(binary.parent), "GH_HOST": "github.com",
+                "XDG_CONFIG_HOME": str(config), "GH_HOST": "github.com",
                 "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}, "check": True,
                 "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 120})
             commands.append(command)

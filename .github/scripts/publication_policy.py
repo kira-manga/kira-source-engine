@@ -785,7 +785,9 @@ def native_verify(gh_asset, bundle, subjects, expected):
         binary.chmod(0o700)
         local_bundle = temp / ("bundle" + bundle.suffix)
         write_new(local_bundle, data)
-        env = {"PATH": os.defpath, "HOME": str(temp), "XDG_CONFIG_HOME": str(temp),
+        config = temp / "config"
+        config.mkdir(mode=0o700)
+        env = {"PATH": os.defpath, "HOME": str(temp), "XDG_CONFIG_HOME": str(config),
                "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
         for subject in subjects:
             command = [str(binary), "attestation", "verify", str(regular(subject)), "--bundle", str(local_bundle),

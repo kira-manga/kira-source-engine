@@ -9,6 +9,7 @@ on:
     paths:
       - .github/workflows/owned-file-promotion-check.yml
       - .github/scripts/owned_file_promotion.py
+      - .github/scripts/publication_policy.py
   workflow_dispatch:
     inputs:
       selection:
