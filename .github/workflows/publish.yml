@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           python3 -B - <<'PY'
-          import base64, hashlib, json, os, ssl, urllib.error, urllib.request
+          import base64, hashlib, json, os, re, ssl, urllib.error, urllib.parse, urllib.request
           token, actor = os.environ.pop('GH_TOKEN'), os.environ.pop('GH_ACTOR')
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, *args, **kwargs):
@@ -74,12 +74,26 @@ jobs:
                       body = response.read(1048577)
                       result.update(status=response.status, within_bound=len(body) <= 1048576,
                           complete_page=response.headers.get('Link') is None)
+                      if 300 <= response.status < 400:
+                          locations = response.headers.get_all('Location', [])
+                          result['redirect_location_count'] = len(locations)
+                          if len(locations) == 1 and len(locations[0]) <= 8192:
+                              target = urllib.parse.urlsplit(locations[0])
+                              host = target.hostname or ''
+                              result['redirect_https'] = target.scheme == 'https'
+                              # Never log a signed URL, userinfo, path or query, or follow it.
+                              if re.fullmatch(r'[A-Za-z0-9.-]{1,253}', host):
+                                  result['redirect_host'] = host
                       if response.status == 200 and len(body) <= 1048576:
                           result['sha256'] = hashlib.sha256(body).hexdigest()
                           if name == 'package_inventory':
                               items = json.loads(body)
-                              result['visible_engine_packages'] = sum(
-                                  (item.get('repository') or {}).get('id') == 1310736214 for item in items)
+                              engine = [item for item in items
+                                  if (item.get('repository') or {}).get('id') == 1310736214]
+                              result['visible_engine_packages'] = len(engine)
+                              result['engine_package_visibility'] = {
+                                  visibility: sum(item.get('visibility') == visibility for item in engine)
+                                  for visibility in ('public', 'private', 'internal')}
               except Exception as error:
                   result['error_class'] = type(error).__name__
               print('KIRA_PUBLICATION_ACCESS ' + json.dumps(result, sort_keys=True))
