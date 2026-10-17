@@ -516,10 +516,82 @@ The old three-GET environment observation API is unchanged. These sequential obs
 are neither atomic nor native approval: workflow placement behind genuine environment
 approval, later writer-boundary rechecks, all-writer/unused-GAV authority, remote Maven
 readback and consumer acceptance remain separate. Both full calls require a fresh checkout,
-before Gradle restoration, and keep the unconditional Stage C hold. No CLI, credential
-discovery, workflow or publisher activation was added; explicit read tokens only reach
-the fixed official API, never native verification or Git.
+before Gradle restoration, and keep the unconditional Stage C hold. Neither fresh API
+discovers credentials or activates a workflow/publisher; explicit read tokens only reach
+the fixed official API, never native verification or Git. The held late-boundary attachment
+below does not replace either fresh call.
 Focused synthetic classes are `test_publisher_publication_intake.PublisherIntakeTests` and
 `test_github_publication_receipts.PublisherPolicyAcquisitionTests`. The new query boundary
 is covered by `test_github_branch_bypass_proof.BranchBypassProofTests` and the caller's
 `test_recheck_reacquires_each_bypass_proof_and_binds_selected_rule_ids` method; no live approval follows.
+
+### Held native remote writer/readback attachment
+
+`-PkiraPublicationMode=promote-remote` configures the **same fifteen original native writers**
+and task identities at the literal `https://maven.pkg.github.com/kira-manga/kira-source-engine`.
+It is **not enabled publication**: the immediate pre-action guard unconditionally refuses
+after its read-only observations. No property, comparison JSON or credential clears that hold.
+`publish.yml`, ordinary `publish` containment and `release_holds()` are unchanged. Local `export`
+and `promote` keep their owned-file, credential-free behavior. Source/model/native-output/action
+checks are not relaxed: destination/authentication is separately audited, not inserted into or
+stripped from the sealed producer model. A new same-source export is required after gate changes.
+
+The eventual trusted caller must run both fresh native-attested publisher APIs **before** any
+generated roots exist, then restore only admitted raw files into the fixed input directory.
+This slice supplies no replacement intake PASS, native approval, tag/version selection, workflow,
+registry absence/reservation or all-writer exclusion. Those real integrations remain prerequisites
+to any separately reviewed hold removal; a Maven404 is never absence authority. Backend preview
+or source tests do not establish App/Backend package-consumer parity.
+
+The held branch requires actual hosted Darwin/ARM64, existing Java21/Gradle9.6.1/offline admission,
+no build/configuration cache, no `--continue`, and the exact whole-cohort producer exclusions.
+Keep the already admitted archive plus `{ "selection": ..., "preflight": ... }` comparison in
+`$RUNNER_TEMP/kira-publisher-<publisher-run-id>-1/{kira-publication-bytes.tar,comparison.json}`:
+same-owner directory0700/files0600, no symlinks, outside the checkout. Supply the independently
+retained comparison-file hash as `kiraPublisherRecordSha256`, alongside the existing seal hash.
+That file is comparison data, **not proof that the required fresh calls/approval occurred**.
+
+Only explicit `KIRA_MAVEN_WRITE_USERNAME`/`KIRA_MAVEN_WRITE_TOKEN` populate native
+PasswordCredentials/Basic. No repository-name credential discovery or token fallback exists.
+Separate `KIRA_PUBLICATION_API_READ_TOKEN` and `KIRA_MAVEN_READ_USERNAME`/`KIRA_MAVEN_READ_TOKEN`
+are sent to the fixed helper through bounded stdin, never argv or files. Read tokens equal to
+the write token refuse. The helper uses fixed `/usr/bin/python3`, a cleared environment,
+owned temporary HOME/TMPDIR, no user Python site, deadline/worker termination and owned cleanup.
+Before handing over read custody, credential-free fixed `/usr/bin/git ls-tree` binds the five
+helper/import files to the selected producer commit. Only the exact verified bytes run from a
+private temporary snapshot; mutable checkout imports, Git replacement/lazy-fetch/protocols,
+global/system configuration and inherited credentials are excluded. The copied policy still verifies
+the original checkout; the fixed local Git lookup disables hooks and filesystem monitoring.
+No write token reaches that helper, its Git subprocesses or its read-only HTTP adapters.
+These names select custody channels, not operational credential authority or proven token scopes.
+
+At each writer the helper rereads source/archive, fresh official producer/publisher/protection
+facts and local lineage, comparing the original preflight. It intentionally uses generated-root-
+aware source comparison **only alongside** this invocation's restore/verify and the original
+whole-output/model/graph/action checks, which repeat after HTTP immediately before the native action.
+First it observes all15 existing artifact indexes with all four checksums. Missing/ambiguous indexes
+refuse; a new artifact without an existing index needs separately proved authority/handling.
+At later boundaries only newly successful writers' immutable payloads/sidecars are read once;
+all indexes remain fresh, previously verified indexes must be byte-identical, and pending indexes
+must remain at their pre-write state. Progress lives only in the serialized invocation service,
+not a saved receipt/cache. This avoids quadratic payload downloads while retaining the still-required
+global writer exclusion. The finalizer deliberately ignores progress and rereads every immutable row.
+
+Remote GETs use the fixed TLS host/path, no redirect/retry/304/content decoding, bounded time/bytes
+and content-free failures. Every payload and deterministic sidecar must match admitted size/SHA256.
+Mutable index XML is separately bounded/strict: retain prior version order, append the candidate
+once, check coordinates/latest/release/timestamp and all four hashes of **actual** index bytes.
+It is not a sealed or expected timestamp/index. Partial/failing writers still fail final completion;
+once a native action started, the finalizer attempts bounded readback, never cleanup/overwrite/retry
+of remote state. Native Gradle itself can retry individual PUTs or warn on some checksum failures;
+its unchanged action is not atomic publication. Pinned native remote/offline behavior and the fixed
+Darwin interpreter/process boundary still require actual hosted qualification before activation.
+
+Focused offline tests (synthetic Git/native/API/HTTP and source assertions, **not Gradle execution**):
+
+```bash
+PYTHONPATH=.github/scripts python3 -B -m unittest -v \
+  test_publisher_publication_intake.PublisherWriterBoundaryTests \
+  test_publisher_publication_intake.NativeAttachmentSourceTests \
+  test_remote_maven_readback.RemoteMavenReadbackTests
+```
