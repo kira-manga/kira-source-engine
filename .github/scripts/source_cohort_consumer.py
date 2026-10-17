@@ -24,7 +24,7 @@ import publisher_workflow as common
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
 SELECTION_SHA256 = "42d71c54d9bd83631417ed734333bf49e1a88f48aded52c721e8bd32edf6d0b3"
-APP_SHA = "2cab935029f94111fface30d0d52527f2c517648"
+APP_SHA = "820daa4485138a1a36465ac6688537e0aa47edd4"
 BACKEND_SHA = "97a7b72d02c1116f79702adc1c605d4cff093d15"
 APP_INIT_SHA = "7eb405ed2f55e81f06f077a5b025b8993ba0f396c60ae1fed31c45f3f13b02e8"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
