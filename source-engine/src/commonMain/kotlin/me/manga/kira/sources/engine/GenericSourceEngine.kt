@@ -92,7 +92,12 @@ class GenericSourceEngine(
     }
 
     override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> = withFailureBoundary {
-        fetchList("featured", page, query = "", map = ::featuredFrom)
+        when (val result = fetchList("featured", page, query = "", map = ::featuredFrom)) {
+            // Carousels may repeat their complete card set for seamless scrolling. Keep the first
+            // occurrence in provider order, not a hard-coded number of slides.
+            is SourceEngineResult.Success -> SourceEngineResult.Success(result.value.distinctBy { it.url })
+            is SourceEngineResult.Failure -> result
+        }
     }
 
     override suspend fun search(
@@ -234,9 +239,17 @@ class GenericSourceEngine(
             // Filter query pairs append AFTER template expansion (percent-encoded, ?/& aware);
             // filter headers override same-name computed headers; filter form entries append after
             // the static formBody in declaration order. All deterministic — see FilterRequestComposer.
+            val method = methodOf(endpoint.method)
+            val requestTemplates = listOf(endpoint.url) + when (method) {
+                SourceHttpMethod.POST_FORM -> endpoint.formBody.values
+                SourceHttpMethod.POST_JSON -> listOf(endpoint.jsonBody)
+                else -> emptyList()
+            }
+            if (requestTemplates.any { "chapterId" in Templates.references(it) } && vars["chapterId"].isNullOrEmpty()) {
+                return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("request:chapterId"))
+            }
             val url = FilterRequestComposer.appendQueryPairs(Templates.expand(endpoint.url, vars), composed.queryPairs)
             val headers = ((precomputedHeaders ?: requestHeaders()) + composed.headerEntries).toMap()
-            val method = methodOf(endpoint.method)
             val form = if (method == SourceHttpMethod.POST_FORM) {
                 endpoint.formBody.map { (key, value) -> key to Templates.expand(value, vars) } + composed.formEntries
             } else {
@@ -271,6 +284,8 @@ class GenericSourceEngine(
             block()
         } catch (c: CancellationException) {
             throw c
+        } catch (_: InvalidChapterOrderException) {
+            SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
         } catch (e: UnresolvedTemplateVarException) {
             // A required URL-template value was empty; reject the broken-but-plausible request.
             SourceEngineResult.Failure(SourceEngineError.Required("var:${e.field}:${e.varName}"))
@@ -394,18 +409,25 @@ class GenericSourceEngine(
      * without the field never filter. Locked chapters return empty images, so hiding them avoids a
      * dead-end blank reader.
      */
-    private fun isLockedChapter(scope: ItemScope): Boolean {
+    private fun isLockedChapter(scope: ItemScope, rootScope: ItemScope? = null): Boolean {
         if (config.fields["chapter.locked"] == null) return false
-        return text(scope, "chapter.locked").trim().lowercase() in lockedValues
+        return text(scope, "chapter.locked", rootScope).trim().lowercase() in lockedValues
     }
 
     /** Per-item recent-chapter chips: each sub-scope under `item.recentChapters` mapped via chapter.* fields. */
     private fun recentChaptersFrom(scope: ItemScope, verb: String): List<SourceChapterRef> {
         val spec = config.fields[verbKey(verb, "item.recentChapters")] ?: return emptyList()
-        return scope.children(spec).filterNot { isLockedChapter(it) }.map { ch ->
+        val chapters = scope.children(spec).filterNot { isLockedChapter(it, scope) }
+        val ordered = if ("chapter.order" in config.fields) {
+            // Resolve every required key eagerly: sorting a singleton may never invoke a selector.
+            chapters.map { it to chapterOrder(it, scope) }.sortedByDescending { it.second }.map { it.first }
+        } else {
+            chapters
+        }
+        return ordered.map { ch ->
             SourceChapterRef(
-                number = text(ch, "chapter.number"),
-                url = link(ch, "chapter.url"),
+                number = text(ch, "chapter.number", scope),
+                url = link(ch, "chapter.url", scope),
             )
         }.filter { isNavigable(it.url) }
     }
@@ -425,9 +447,10 @@ class GenericSourceEngine(
         val chapterLocator = config.fields["detail.chapters"]
         val chapters = if (chapterLocator != null) {
             parsed.subScopes(chapterLocator)
-                .filterNot { isLockedChapter(it) }
-                .map { chapterFrom(it) }
-                .filter { isNavigable(it.url) }
+                .filterNot { isLockedChapter(it, root) }
+                .map { chapterFrom(it, root) }
+                .filter { isNavigable(it.chapter.url) }
+                .orderedChapters()
         } else {
             emptyList()
         }
@@ -451,11 +474,13 @@ class GenericSourceEngine(
      * pattern). The list is located via the chapters endpoint's own `root`/`listSelector`; each element
      * is mapped through the same `chapter.*` fields + locked-filter as the inline path.
      */
-    private fun chaptersFrom(parsed: Extractor.ParsedBody): List<SourceChapter> =
-        parsed.listScopes()
-            .filterNot { isLockedChapter(it) }
-            .map { chapterFrom(it) }
-            .filter { isNavigable(it.url) }
+    private fun chaptersFrom(parsed: Extractor.ParsedBody): List<ExtractedChapter> {
+        val root = parsed.rootScope()
+        return parsed.listScopes()
+            .filterNot { isLockedChapter(it, root) }
+            .map { chapterFrom(it, root) }
+            .filter { isNavigable(it.chapter.url) }
+    }
 
     /**
      * A chapter is kept only if it has a real destination. Locked/paywalled chapters on some sites use a
@@ -474,10 +499,11 @@ class GenericSourceEngine(
      * details call rather than returning the chapters gathered so far as a complete result.
      */
     private suspend fun chaptersPaginated(endpoint: EndpointSpec, baseVars: Map<String, String>): SourceEngineResult<List<SourceChapter>> {
+        if (endpoint.pageParam == "chapterId") return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
         if (endpoint.pageParam.isEmpty()) {
-            return runRequest(endpoint, baseVars) { resp -> chaptersFrom(Extractor.parse(resp.body, effectiveBaseUrl, endpoint)) }
+            return runRequest(endpoint, baseVars) { resp -> chaptersFrom(Extractor.parse(resp.body, effectiveBaseUrl, endpoint)).orderedChapters() }
         }
-        val all = mutableListOf<SourceChapter>()
+        val all = mutableListOf<ExtractedChapter>()
         var page = 1
         var maxPage = Int.MAX_VALUE
         val safetyCap = 200
@@ -503,7 +529,7 @@ class GenericSourceEngine(
                 }
             }
         }
-        return SourceEngineResult.Success(all)
+        return SourceEngineResult.Success(all.orderedChapters())
     }
 
     private data class PageState(val hasNext: Boolean, val maxPage: Int?)
@@ -526,21 +552,37 @@ class GenericSourceEngine(
         return PageState(hasNext = true, maxPage = null)
     }
 
-    private fun chapterFrom(scope: ItemScope): SourceChapter = SourceChapter(
-        number = text(scope, "chapter.number"),
-        name = text(scope, "chapter.name"),
-        url = link(scope, "chapter.url"),
-        date = config.fields["chapter.date"]?.let { spec ->
-            scope.field(spec)?.let { DateStrategies.parse(Transforms.apply(it, spec.transform), spec.dateStrategy) }
-        },
+    private data class ExtractedChapter(val chapter: SourceChapter, val order: Double?)
+    private class InvalidChapterOrderException : Exception()
+
+    /** Optional numeric newest-first order. Missing/malformed values must not silently become zero. */
+    private fun chapterOrder(scope: ItemScope, rootScope: ItemScope): Double? {
+        if ("chapter.order" !in config.fields) return null
+        return text(scope, "chapter.order", rootScope).toDoubleOrNull()?.takeIf { it.isFinite() }
+            ?: throw InvalidChapterOrderException()
+    }
+
+    private fun List<ExtractedChapter>.orderedChapters(): List<SourceChapter> =
+        (if ("chapter.order" in config.fields) sortedByDescending { it.order } else this).map { it.chapter }
+
+    private fun chapterFrom(scope: ItemScope, rootScope: ItemScope): ExtractedChapter = ExtractedChapter(
+        chapter = SourceChapter(
+            number = text(scope, "chapter.number", rootScope),
+            name = text(scope, "chapter.name", rootScope),
+            url = link(scope, "chapter.url", rootScope),
+            date = config.fields["chapter.date"]?.let { spec ->
+                scope.field(spec)?.let { DateStrategies.parse(Transforms.apply(it, spec.transform), spec.dateStrategy) }
+            },
+        ),
+        order = chapterOrder(scope, rootScope),
     )
 
     // --- field helpers ----------------------------------------------------------------------------
 
     /** Extract + transform a scalar text field; "" if absent. */
-    private fun text(scope: ItemScope, key: String): String {
+    private fun text(scope: ItemScope, key: String, rootScope: ItemScope? = null): String {
         val spec = config.fields[key] ?: return ""
-        return resolveField(scope, key, spec)
+        return resolveField(scope, key, spec, rootScope)
     }
 
     /**
@@ -593,8 +635,9 @@ class GenericSourceEngine(
             val isDirToken = loc0 == "root:__dir"
             val resolved = when {
                 isDirToken -> chosenDir
-                // `root:<path>` → resolve against the RESPONSE root (a sibling of the per-page array),
-                // e.g. DilarV2's page image needs the root-level `storage_key`.
+                // Pages: response root. Chapters: the object containing the chapter collection
+                // (response root for details/chapters, parent feed item for recent chapters).
+                // This scope is passed by value through extraction, never stored between requests.
                 loc0.startsWith("root:") -> rootScope?.raw(loc0.removePrefix("root:").trim()).orEmpty()
                 // Otherwise resolve against the per-item scope. The locator may list COMMA-separated
                 // fallback locators (first non-empty wins) — lets one var span sources whose field name
@@ -646,9 +689,9 @@ class GenericSourceEngine(
     }
 
     /** A link field, absolutised against the live base URL. Resolves strict (a broken URL must fail-close). */
-    private fun link(scope: ItemScope, key: String): String {
+    private fun link(scope: ItemScope, key: String, rootScope: ItemScope? = null): String {
         val spec = config.fields[key] ?: return ""
-        return absolutize(resolveField(scope, key, spec, strict = true), effectiveBaseUrl)
+        return absolutize(resolveField(scope, key, spec, rootScope, strict = true), effectiveBaseUrl)
     }
 
     /** An image field, absolutised against [SourceConfig.imageBase] (falling back to the live base); null if absent. */
@@ -698,6 +741,7 @@ class GenericSourceEngine(
         "queryJson" to JsonEscape.escape(query),
         "itemUrl" to itemUrl,
         "chapterUrl" to chapterUrl,
+        "chapterId" to HttpDestination.parse(chapterUrl)?.lastPathSegment().orEmpty(),
         "id" to itemUrl.trimEnd('/').substringAfterLast('/'),
     )
 

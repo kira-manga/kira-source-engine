@@ -149,6 +149,22 @@ object DeclarationCapabilityFixtures {
             "template.variable.unsupported", "fields[item.title].template")
         reject("direct_root_token_is_not_interpolation", source(fields = mapOf("item.url" to FieldSpec(template = "{baseUrl}/{root:id}"))),
             "template.root.unsupported", "fields[item.url].template")
+        accept("chapter_identity_for_reader_request", source(
+            endpoints = mapOf("pages" to EndpointSpec("{baseUrl}/reader/{id}/{chapterId}", root = "pages")),
+        ))
+        reject("chapter_identity_unavailable_to_home", source(
+            endpoints = mapOf("home" to EndpointSpec("{baseUrl}/{chapterId}")),
+        ), "template.variable.unsupported", "endpoints[home].url")
+        reject("chapter_identity_cannot_be_a_chapter_counter", source(
+            endpoints = mapOf("chapters" to EndpointSpec("{baseUrl}/{chapterId}", pageParam = "chapterId", lastPageLocator = "next")),
+        ), "pagination.counter.reserved", "endpoints[chapters].pageParam")
+        accept("chapter_url_has_collection_root", source(
+            endpoints = mapOf("details" to EndpointSpec("{itemUrl}")),
+            fields = mapOf(
+                "detail.chapters" to FieldSpec(listPath = "chapters"),
+                "chapter.url" to FieldSpec(template = "{baseUrl}/{series}/{chapter}", vars = mapOf("series" to "root:slug", "chapter" to "slug")),
+            ),
+        ))
         reject("root_unavailable_to_item_field", source(fields = mapOf("item.url" to FieldSpec(template = "{id}", vars = mapOf("id" to "root:id")))),
             "field.variable.root_context", "fields[item.url].vars[0]")
         for (expression in listOf("id|unknown", "id|trim()", "id|")) {

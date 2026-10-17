@@ -57,6 +57,7 @@ class SourceDeclarationCapabilities(
                 val path = "endpoints[$verb]"
                 val templates = requestTemplates(endpoint, path)
                 val variables = Templates.REQUEST_VARIABLES.toMutableSet()
+                if (verb != "pages") variables.remove("chapterId")
                 if (verb in LIST_VERBS) {
                     source.filters.filter { verb in it.appliesTo }.forEach { filter ->
                         if (filter.request.target in PLACEHOLDER_TARGETS) variables += filter.request.param
@@ -115,7 +116,9 @@ class SourceDeclarationCapabilities(
                     finding("pagination.counter.required", "$path.pageParam", "A chapter termination locator requires a counter variable.")
                 }
             } else {
-                if (!Templates.isVariableName(counter)) {
+                if (counter == "chapterId") {
+                    finding("pagination.counter.reserved", "$path.pageParam", "The chapter identity cannot be a pagination counter.")
+                } else if (!Templates.isVariableName(counter)) {
                     finding("pagination.counter.name", "$path.pageParam", "The chapter counter must be a template variable name.")
                 } else if (templates.none { counter in Templates.references(it) }) {
                     finding("pagination.counter.unconsumed", "$path.pageParam", "The chapter counter must occur in the URL, an active form value, or the active JSON body.")
@@ -158,9 +161,10 @@ class SourceDeclarationCapabilities(
                         val recent = key("item.recentChapters")
                         if (recent in source.fields) {
                             field(recent, html, FieldMode.LIST)
-                            field("chapter.number", html)
-                            field("chapter.url", html)
-                            field("chapter.locked", html)
+                            field("chapter.number", html, rootAvailable = true)
+                            field("chapter.url", html, rootAvailable = true)
+                            field("chapter.locked", html, rootAvailable = true)
+                            field("chapter.order", html, rootAvailable = true)
                         }
                     } else if (source.blacklistGenres.isNotEmpty()) {
                         field(key("item.genres"), html, FieldMode.LIST)
@@ -185,7 +189,7 @@ class SourceDeclarationCapabilities(
         }
 
         private fun chapterFields(html: Boolean) {
-            for (name in listOf("number", "name", "url", "locked")) field("chapter.$name", html)
+            for (name in listOf("number", "name", "url", "locked", "order")) field("chapter.$name", html, rootAvailable = true)
             field("chapter.date", html, FieldMode.DATE)
         }
 
@@ -248,7 +252,7 @@ class SourceDeclarationCapabilities(
                         // This sentinel is defined even when no directory is supplied (including
                         // scalar contexts other than page.image): the executor binds it to empty.
                     } else if (!rootAvailable) {
-                        finding("field.variable.root_context", varPath, "Only page.image receives the response-root locator context.")
+                        finding("field.variable.root_context", varPath, "Only page.image and chapter scalar fields receive an outer locator context.")
                     } else {
                         rawLocator(locator.removePrefix("root:").trim(), html, varPath)
                     }

@@ -20,7 +20,7 @@ class TemplatesTest {
     @Test
     fun request_and_field_seed_names_are_not_the_same_namespace() {
         assertEquals(setOf("baseUrl", "imageBase"), Templates.FIELD_VARIABLES)
-        assertEquals(setOf("baseUrl", "imageBase", "page", "pageOffset", "query", "queryEncoded", "queryJson", "itemUrl", "chapterUrl", "id"), Templates.REQUEST_VARIABLES)
+        assertEquals(setOf("baseUrl", "imageBase", "page", "pageOffset", "query", "queryEncoded", "queryJson", "itemUrl", "chapterUrl", "chapterId", "id"), Templates.REQUEST_VARIABLES)
     }
 
     @Test

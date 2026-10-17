@@ -16,6 +16,10 @@ internal class HttpDestination private constructor(
     fun resolve(location: String): HttpDestination? =
         HttpReference.parse(location)?.resolveAgainst(reference)?.encodedUrl()?.let { parse(it) }
 
+    /** Encoded identity only: no query/fragment, decoding, or re-encoding of an existing URL. */
+    fun lastPathSegment(): String? = reference.path.trimEnd('/').substringAfterLast('/')
+        .takeIf { it.isNotEmpty() && it != "." && it != ".." }
+
     companion object {
         fun parse(url: String): HttpDestination? {
             val reference = HttpReference.parse(url) ?: return null

@@ -11,7 +11,7 @@ internal object Templates {
 
     val REQUEST_VARIABLES: Set<String> = setOf(
         "baseUrl", "imageBase", "page", "pageOffset", "query", "queryEncoded", "queryJson",
-        "itemUrl", "chapterUrl", "id",
+        "itemUrl", "chapterUrl", "chapterId", "id",
     )
     val FIELD_VARIABLES: Set<String> = setOf("baseUrl", "imageBase")
 

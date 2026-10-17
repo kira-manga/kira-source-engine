@@ -160,6 +160,8 @@ data class PaginationSpec(
 /**
  * One request template + how to find the result list in the response. [url] is a template with
  * `{baseUrl}`, `{imageBase}`, `{page}`, `{query}`, `{itemUrl}`, `{chapterUrl}`, `{id}` placeholders.
+ * Pages also supply `{chapterId}`: the encoded last path segment of a valid HTTP(S) chapter URL,
+ * ignoring query, fragment and trailing slashes. It is not the manga `{id}`; missing identity fails.
  * For JSON responses [root] is the JSONPath to the array; for HTML [listSelector] is the CSS
  * selector matching each item element.
  */
@@ -218,6 +220,9 @@ data class FilterSpec(
  * (JSONPath) or [selector] (CSS) is the primary locator; the other family's fields are ignored.
  * [transform] applies an ordered chain of named, generic transforms (coalesce, regex-replace,
  * enum-map, strip-html, date-parse, …) that the engine resolves by name.
+ * Optional `chapter.order` supplies a finite numeric newest-first sort key. Ordering is stable for
+ * ties and applies across the full fetched chapter list; absent preserves provider order. Malformed
+ * required sort keys fail the operation rather than silently becoming zero. Chapter URLs stay IDs.
  */
 @Serializable
 data class FieldSpec(
@@ -228,6 +233,12 @@ data class FieldSpec(
     val fallbackSelectors: List<String> = emptyList(),
     val lazyAttrChain: List<String> = emptyList(),
     val template: String = "",
+    /**
+     * Named locator/transform expressions, not scripts. `root:path` on page.image reads the response
+     * root. On chapter scalar templates it reads the outer chapter-collection scope: response root
+     * for inline/separate chapters, parent feed item for recent chapters. Other fields have no root.
+     * `root:__dir` retains its existing page-root-directory meaning (empty in other contexts).
+     */
     val vars: Map<String, String> = emptyMap(),
     val listPath: String = "",
     val listSelector: String = "",
