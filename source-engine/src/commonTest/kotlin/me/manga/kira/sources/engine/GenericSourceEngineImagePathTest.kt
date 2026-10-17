@@ -54,7 +54,7 @@ class GenericSourceEngineImagePathTest {
 
     @Test
     fun html_abs_src_spaces_preserve_order_ad_filter_and_whole_map_confinement() = runTest {
-        val http = RecordingTransport { SourceResponse(200, HTML_PAGES) }
+        val http = RecordingTransport { SourceResponse(200, IMAGE_PATH_HTML_PAGES) }
         var reads = 0
         val pages = GenericSourceEngine(config(), http, SourceHeaderProvider { reads++; captured })
             .pages(manga, chapter).valueOrFail()
@@ -145,7 +145,7 @@ class GenericSourceEngineImagePathTest {
     }
 }
 
-private const val HTML_PAGES = """
+private const val IMAGE_PATH_HTML_PAGES = """
 <html><body>
 <img class="page" src="/img/free_ads.jpg">
 <img class="page" src="https://foreign.test/Series Name/1/1.jpg?sig=a%2Fb+%20#part%20">
