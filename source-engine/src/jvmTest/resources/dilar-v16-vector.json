@@ -1,0 +1,15 @@
+{
+  "provenance": "Synthetic deterministic fixture. Python cryptography P256/HKDF-SHA384 + system libsodium 1.0.18 XChaCha20-Poly1305. Private scalars 1/2 are PUBLIC TEST VALUES, never production credentials.",
+  "clientPrivateScalar": 1,
+  "clientPublicKey": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+  "expectedPlaintext": "{\"id\":\"42\",\"series_id\":\"7\",\"pages\":[{\"url\":\"000.webp\",\"order\":0}],\"synthetic\":true}",
+  "expectedMaterialHex": "2154dfa83de91a696e89856db92043bbf92a493718f7a635206d575b97805e8f881c61ce542caa5127e4626e91bc7bbe20a1ed9bef66fe9d",
+  "envelope": {
+    "v": 16,
+    "e": 1729000000,
+    "epk": "BHzyexiNA09-ilI4AwS1GsPAiWnid_IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+    "iv": "AAECAwQFBgcICQoLDA0ODw",
+    "ct": "b2Hn9fHlAhWoI7yJSscW7ZwUW9tqUkLXsJx-KY6Cm7A0y-KOSNj_ZoQAZGCg1xCKX1qeUD-TvI3Hgl3-1CodMZbAB9Y9SPvIeZ4VVEzuxnuv_DI",
+    "tag": "qXAxfi4AWYGu7GTGDHNU5w"
+  }
+}
