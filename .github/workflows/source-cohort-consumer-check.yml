@@ -72,7 +72,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/Kira-backend
-          ref: 1172a9d9be4d1083bdaefa8fbe50ea0776834234
+          ref: bef7dcf48c1165dd8c0359fdc1df29214bf72e8b
           path: backend
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
