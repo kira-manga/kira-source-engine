@@ -13,12 +13,14 @@ import publication_policy as policy
 
 
 HOST = "maven.pkg.github.com"
+STORAGE_HOST = "github-registry-files.githubusercontent.com"
 PREFIX = "/kira-manga/kira-source-engine/"
 REPOSITORY_URL = "https://" + HOST + PREFIX[:-1]
 SOCKET_SECONDS = 15
 READ_SECONDS = 30
 COHORT_SECONDS = 300
 INDEX_LIMIT = 4 * 1024 * 1024
+LOCATION_LIMIT = 8192
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
 
 
@@ -46,62 +48,84 @@ def _path(value):
     return PREFIX + value
 
 
+def _storage_target(response):
+    locations = [value for name, value in response.getheaders() if name.lower() == "location"]
+    policy.require(len(locations) == 1, "Ambiguous registry redirect refused")
+    value = locations[0]
+    policy.require(type(value) is str and 0 < len(value) <= LOCATION_LIMIT
+                   and all("!" <= char <= "~" for char in value)
+                   and not any(char in value for char in ("\\", "#", ",")), "Registry redirect target refused")
+    # Match the literal authority without URL-parser normalization; retain signed path/query bytes.
+    match = re.fullmatch(r"https://" + re.escape(STORAGE_HOST) + r"(?::443)?(/.*)", value)
+    policy.require(match is not None, "Registry redirect target refused")
+    return match.group(1)
+
+
 def _read(path, credentials, limit, budget, *, capture=False):
-    """No redirects, retries, token discovery or decoding; hash the actual response bytes."""
+    """One credential-free storage hop only; no retries, token discovery or decoding."""
     target = _path(path)
     username, token = read_credentials(*credentials)
     policy.require(type(limit) is int and 0 <= limit <= policy.MAX_BYTES, "Remote byte bound refused")
-    budget.check()
-    budget.requests -= 1
-    policy.require(budget.requests >= 0, "Remote request bound exceeded")
-    connection = http.client.HTTPSConnection(HOST, timeout=SOCKET_SECONDS, context=ssl.create_default_context())
-    response = None
-    try:
-        deadline = min(budget.deadline, time.monotonic() + READ_SECONDS)
-        authorization = base64.b64encode((username + ":" + token).encode("ascii")).decode("ascii")
-        connection.request("GET", target, headers={"Authorization": "Basic " + authorization,
-                           "Accept-Encoding": "identity", "Cache-Control": "no-cache",
-                           "User-Agent": "kira-native-publication-readback"})
-        response = connection.getresponse()
-        policy.require(response.status == 200, "Remote HTTP status refused; not absence authority")
-        headers = response.getheaders()
-        for name in ("content-length", "content-encoding", "transfer-encoding", "age", "location"):
-            policy.require(sum(key.lower() == name for key, _ in headers) <= 1, "Ambiguous HTTP headers refused")
-        policy.require(response.getheader("Content-Encoding", "identity").lower() == "identity"
-                       and not response.getheader("Location"), "Encoded or redirected bytes refused")
-        age = response.getheader("Age")
-        policy.require(age is None or re.fullmatch(r"0{1,8}", age) is not None, "Aged bytes refused")
-        length = response.getheader("Content-Length")
-        transfer = response.getheader("Transfer-Encoding")
-        policy.require(transfer is None or (transfer.lower() == "chunked" and length is None),
-                       "Ambiguous response framing refused")
-        if length is not None:
-            policy.require(re.fullmatch(r"0|[1-9][0-9]{0,9}", length) is not None and int(length) <= limit,
-                           "Remote response length refused")
-            length = int(length)
-        hashes = {name: hashlib.new(name, usedforsecurity=False) for name in policy.ALGORITHMS}
-        size, body = 0, bytearray()
-        while True:
-            policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
-            chunk = response.read1(min(65536, limit + 1 - size))
-            policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
-            if not chunk:
-                break
-            size += len(chunk)
-            budget.bytes -= len(chunk)
-            policy.require(size <= limit and budget.bytes >= 0, "Remote response byte bound exceeded")
-            for value in hashes.values():
-                value.update(chunk)
-            if capture:
-                body.extend(chunk)
-        policy.require(length is None or length == size, "Truncated remote response refused")
-        return {"size": size, **{name: value.hexdigest() for name, value in hashes.items()}}, bytes(body)
-    finally:
+    deadline = min(budget.deadline, time.monotonic() + READ_SECONDS)
+    authorization = base64.b64encode((username + ":" + token).encode("ascii")).decode("ascii")
+    host = HOST
+    for hop in range(2):
+        budget.check()
+        policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
+        budget.requests -= 1
+        policy.require(budget.requests >= 0, "Remote request bound exceeded")
+        connection = http.client.HTTPSConnection(host, timeout=SOCKET_SECONDS, context=ssl.create_default_context())
+        response = None
         try:
-            if response is not None:
-                response.close()
+            headers = {"Accept-Encoding": "identity", "Cache-Control": "no-cache",
+                       "User-Agent": "kira-native-publication-readback"}
+            if hop == 0:
+                headers["Authorization"] = "Basic " + authorization
+            connection.request("GET", target, headers=headers)
+            response = connection.getresponse()
+            policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
+            if hop == 0 and response.status == 302:
+                target, host = _storage_target(response), STORAGE_HOST
+                continue  # Close the unused redirect body/connection before the unauthenticated GET.
+            policy.require(response.status == 200, "Remote HTTP status refused; not absence authority")
+            headers = response.getheaders()
+            for name in ("content-length", "content-encoding", "transfer-encoding", "age", "location"):
+                policy.require(sum(key.lower() == name for key, _ in headers) <= 1, "Ambiguous HTTP headers refused")
+            policy.require(response.getheader("Content-Encoding", "identity").lower() == "identity"
+                           and not response.getheader("Location"), "Encoded or redirected bytes refused")
+            age = response.getheader("Age")
+            policy.require(age is None or re.fullmatch(r"0{1,8}", age) is not None, "Aged bytes refused")
+            length = response.getheader("Content-Length")
+            transfer = response.getheader("Transfer-Encoding")
+            policy.require(transfer is None or (transfer.lower() == "chunked" and length is None),
+                           "Ambiguous response framing refused")
+            if length is not None:
+                policy.require(re.fullmatch(r"0|[1-9][0-9]{0,9}", length) is not None and int(length) <= limit,
+                               "Remote response length refused")
+                length = int(length)
+            hashes = {name: hashlib.new(name, usedforsecurity=False) for name in policy.ALGORITHMS}
+            size, body = 0, bytearray()
+            while True:
+                policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
+                chunk = response.read1(min(65536, limit + 1 - size))
+                policy.require(time.monotonic() < deadline, "Remote response time bound exceeded")
+                if not chunk:
+                    break
+                size += len(chunk)
+                budget.bytes -= len(chunk)
+                policy.require(size <= limit and budget.bytes >= 0, "Remote response byte bound exceeded")
+                for value in hashes.values():
+                    value.update(chunk)
+                if capture:
+                    body.extend(chunk)
+            policy.require(length is None or length == size, "Truncated remote response refused")
+            return {"size": size, **{name: value.hexdigest() for name, value in hashes.items()}}, bytes(body)
         finally:
-            connection.close()
+            try:
+                if response is not None:
+                    response.close()
+            finally:
+                connection.close()
 
 
 def cohort(inventory, version):

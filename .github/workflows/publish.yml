@@ -99,6 +99,63 @@ jobs:
               print('KIRA_PUBLICATION_ACCESS ' + json.dumps(result, sort_keys=True))
           PY
 
+      - name: Check out only the selected readback helpers without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: access-check
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/scripts/publication_policy.py
+            /.github/scripts/remote_maven_readback.py
+
+      - name: Verify an actual known Maven POM with the selected production reader
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import json, os, pathlib, sys, xml.etree.ElementTree as ET
+          token, actor = os.environ.pop('GH_TOKEN'), os.environ.pop('GH_ACTOR')
+          helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check/.github/scripts'
+          sys.path.insert(0, str(helpers))
+          try:
+              import remote_maven_readback as reader
+              budget = reader._Budget()
+              budget.requests = 2
+              facts, body = reader._read(
+                  'me/manga/kira/source/source-engine/0.1.0/source-engine-0.1.0.pom',
+                  (actor, token), 1048576, budget, capture=True)
+              if b'<!DOCTYPE' in body or b'<!ENTITY' in body:
+                  raise ValueError('POM entity declaration refused')
+              pom = ET.fromstring(body.decode('utf-8'))
+              ns = '{http://maven.apache.org/POM/4.0.0}'
+              if pom.tag != ns + 'project' or [pom.findtext(ns + key) for key in
+                      ('groupId', 'artifactId', 'version')] != ['me.manga.kira.source', 'source-engine', '0.1.0']:
+                  raise ValueError('Known POM identity differs')
+              print('KIRA_MAVEN_READER ' + json.dumps({'result': 'PASS', 'read_only': True,
+                  'version': '0.1.0', 'size': facts['size'], 'sha256': facts['sha256'],
+                  'requests': 2 - budget.requests}, sort_keys=True))
+          except Exception as error:
+              print('KIRA_MAVEN_READER ' + json.dumps({'result': 'FAIL', 'error_class': type(error).__name__}))
+              raise SystemExit(1) from None
+          PY
+
+      - name: Remove only this diagnostic's disposable helper checkout
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check'
+          if root.is_symlink():
+              raise SystemExit('Redirected diagnostic cleanup refused')
+          if root.exists():
+              shutil.rmtree(root)
+          PY
+
   preflight:
     if: >-
       ${{ !inputs.access_check && github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&

@@ -24,6 +24,7 @@ class Response(io.BytesIO):
     def __init__(self, data, headers, status, on_read):
         super().__init__(data)
         self.headers, self.status, self.on_read = headers, status, on_read
+        self.read_count = 0
 
     def getheaders(self):
         return list(self.headers)
@@ -33,6 +34,7 @@ class Response(io.BytesIO):
         return ", ".join(values) if values else default
 
     def read1(self, size):
+        self.read_count += 1
         if self.on_read is not None:
             self.on_read()
         return super().read1(size)
@@ -76,19 +78,28 @@ class RemoteMavenReadbackTests(unittest.TestCase):
             self.set_index(identity, index_bytes(value["artifact"], versions))
 
     def connect(self, host, *, timeout, context):
-        self.assertEqual((host, timeout), (remote.HOST, 15))
+        self.assertIn(host, (remote.HOST, remote.STORAGE_HOST))
+        self.assertEqual(timeout, 15)
         self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        if host == remote.STORAGE_HOST:
+            self.assertTrue(self.responses[-1].closed)
+            self.connections[-1].close.assert_called_once()
         connection = mock.Mock()
 
         def request(method, path, *, headers):
             self.assertEqual(method, "GET")
-            self.assertTrue(path.startswith(remote.PREFIX))
             self.assertEqual(headers["Accept-Encoding"], "identity")
             self.assertEqual(headers["Cache-Control"], "no-cache")
             self.assertNotIn("If-None-Match", headers)
-            self.assertEqual(headers["Authorization"], "Basic cmVhZGVyOnN5bnRoZXRpY19yZWFk")
-            self.requests.append(path)
-            relative = path[len(remote.PREFIX):]
+            if host == remote.HOST:
+                self.assertTrue(path.startswith(remote.PREFIX))
+                self.assertEqual(headers["Authorization"], "Basic cmVhZGVyOnN5bnRoZXRpY19yZWFk")
+                relative = path[len(remote.PREFIX):]
+            else:
+                self.assertEqual(set(headers), {"Accept-Encoding", "Cache-Control", "User-Agent"})
+                relative = path
+            self.requests.append((host, path))
             data = self.objects.get(relative, b"not absence authority")
             response = Response(data, self.headers.get(relative, [("Content-Length", str(len(data)))]),
                                 self.status.get(relative, 200 if relative in self.objects else 404), self.on_read)
@@ -100,6 +111,14 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         connection.request.side_effect = request
         self.connections.append(connection)
         return connection
+
+    def redirect(self, path, *, port=""):
+        target = "/objects/%2C/" + path + "?sig=synthetic_SIGNED%2Cvalue&part=1"
+        self.objects[target] = self.objects[path]
+        self.status[path] = 302
+        self.headers[path] = [("Location", "https://" + remote.STORAGE_HOST + port + target),
+                              ("Set-Cookie", "synthetic_COOKIE=never-forwarded")]
+        return target
 
     def assert_closed(self):
         self.assertTrue(all(response.closed for response in self.responses))
@@ -194,6 +213,133 @@ class RemoteMavenReadbackTests(unittest.TestCase):
                 self.headers[path] = headers
                 with self.assertRaisesRegex(policy.Refusal, "^Remote pre-write index observation refused$"):
                     self.before()
+
+    def test_full_redirected_cohort_keeps_signed_targets_auth_isolation_and_all_byte_checks(self):
+        for number, path in enumerate(list(self.objects)):
+            self.redirect(path, port=":443" if number % 2 else "")
+        before = self.before()
+        self.publish_indexes(self.identities)
+        for identity in self.identities:
+            path = self.index_path(identity)
+            for value in [path] + [path + "." + algorithm for algorithm in policy.ALGORITHMS]:
+                self.redirect(value)
+        result = self.verify(before)
+        self.assertEqual(result["completed"], self.identities)
+        self.assertEqual(len(self.requests), 2 * (len(policy.text_lines(self.inventory)) + 2 * 15 * 5))
+        for registry, storage in zip(self.requests[::2], self.requests[1::2]):
+            self.assertEqual(registry[0], remote.HOST)
+            self.assertEqual(storage, (remote.STORAGE_HOST, "/objects/%2C/" + registry[1][len(remote.PREFIX):]
+                                       + "?sig=synthetic_SIGNED%2Cvalue&part=1"))
+        self.assertTrue(all(response.read_count == 0 for response in self.responses[::2]))
+        self.assertNotIn("synthetic_", repr(result))
+
+    def test_redirect_location_bound_ambiguity_authority_and_control_characters_refuse_before_storage(self):
+        path = self.index_path(self.identities[0])
+        valid = "https://" + remote.STORAGE_HOST + "/object?sig=synthetic_SIGNED"
+        targets = ["", "/object", "//" + remote.STORAGE_HOST + "/object", valid.replace("https:", "http:"),
+                   valid.replace(remote.STORAGE_HOST, "untrusted.invalid"),
+                   valid.replace(remote.STORAGE_HOST, remote.STORAGE_HOST + ".untrusted.invalid"),
+                   valid.replace(remote.STORAGE_HOST, remote.STORAGE_HOST + "@untrusted.invalid"),
+                   valid.replace(remote.STORAGE_HOST, "user@" + remote.STORAGE_HOST),
+                   valid.replace(remote.STORAGE_HOST, remote.STORAGE_HOST + ":444"),
+                   valid.replace(remote.STORAGE_HOST, remote.STORAGE_HOST + ":0443"),
+                   valid.replace(remote.STORAGE_HOST, remote.STORAGE_HOST + "."),
+                   valid.replace("github-", "%67ithub-"), valid + "#", valid + "#fragment",
+                   " " + valid, valid + " ", valid + "\r\n", valid + "\t", valid + "\x00",
+                   valid + "\x7f", valid + "\u0085", valid + "\\other", valid + "," + valid,
+                   valid + ", " + valid, valid + "x" * remote.LOCATION_LIMIT]
+        cases = [[], [("Location", valid), ("location", valid)],
+                 *[[("Location", target)] for target in targets]]
+        self.status[path] = 302
+        for number, headers in enumerate(cases):
+            with self.subTest(case=number):
+                self.headers[path] = headers
+                count = len(self.requests)
+                with self.assertRaisesRegex(policy.Refusal, "^Remote pre-write index observation refused$"):
+                    self.before()
+                self.assertEqual(len(self.requests), count + 1)
+        self.assertTrue(all(host == remote.HOST for host, _ in self.requests))
+
+    def test_storage_non200_chains_encoding_age_and_framing_refuse_without_retry(self):
+        path = self.index_path(self.identities[0])
+        target = self.redirect(path)
+        location = ("Location", "https://" + remote.STORAGE_HOST + "/another?sig=synthetic_SIGNED")
+        for status in (301, 302, 303, 304, 307, 308, 401, 403, 404, 500):
+            with self.subTest(status=status):
+                self.status[target], self.headers[target] = status, [location]
+                count = len(self.requests)
+                with self.assertRaisesRegex(policy.Refusal, "^Remote pre-write index observation refused$"):
+                    self.before()
+                self.assertEqual(len(self.requests), count + 2)
+        self.status.pop(target)
+        for number, headers in enumerate([[location], [("Age", "1")], [("Content-Encoding", "gzip")],
+                                         [("Content-Length", "1"), ("content-length", "1")],
+                                         [("Content-Length", "1"), ("Transfer-Encoding", "chunked")],
+                                         [("Transfer-Encoding", "gzip")], [("Content-Length", "0")],
+                                         [("Content-Length", str(len(self.objects[target]) + 1))]]):
+            with self.subTest(headers=number):
+                self.headers[target] = headers
+                count = len(self.requests)
+                with self.assertRaisesRegex(policy.Refusal, "^Remote pre-write index observation refused$"):
+                    self.before()
+                self.assertEqual(len(self.requests), count + 2)
+
+    def test_redirect_hops_share_request_byte_and_response_cohort_deadlines(self):
+        path = self.index_path(self.identities[0])
+        target = self.redirect(path)
+        data = self.objects[target]
+        budget = remote._Budget()
+        budget.requests = 1
+        with self.assertRaisesRegex(policy.Refusal, "^Remote request bound exceeded$"):
+            remote._read(path, ("reader", "synthetic_read"), len(data), budget)
+        self.assertEqual(len(self.requests), 1)
+        budget = remote._Budget()
+        budget.requests, budget.bytes = 2, len(data)
+        facts, body = remote._read(path, ("reader", "synthetic_read"), len(data), budget, capture=True)
+        self.assertEqual((budget.requests, budget.bytes, body), (0, 0, data))
+        self.assertEqual(facts["sha256"], policy.digest(data))
+        budget = remote._Budget()
+        budget.bytes = len(data) - 1
+        with self.assertRaisesRegex(policy.Refusal, "^Remote response byte bound exceeded$"):
+            remote._read(path, ("reader", "synthetic_read"), len(data), budget)
+        for deadline, advance in ((300, 16), (5, 3)):
+            with self.subTest(deadline=deadline), mock.patch.object(remote.time, "monotonic") as monotonic:
+                clock = [0]
+                monotonic.side_effect = lambda: clock[0]
+                budget = remote._Budget()
+                budget.deadline = deadline
+                self.on_request = lambda: clock.__setitem__(0, clock[0] + advance)
+                count = len(self.requests)
+                with self.assertRaisesRegex(policy.Refusal, "^Remote response time bound exceeded$"):
+                    remote._read(path, ("reader", "synthetic_read"), len(data), budget)
+                self.assertEqual(len(self.requests), count + 2)
+                self.assertEqual(self.responses[-1].read_count, 0)
+        self.on_request = None
+
+    def test_redirected_immutable_hash_mismatch_and_storage_provider_error_stay_sanitized(self):
+        before = self.before()
+        self.publish_indexes(self.identities)
+        path = self.publications[self.identities[0]]["rows"][0][0]
+        target = self.redirect(path)
+        original = self.objects[target]
+        self.objects[target] = b"x" * len(original)
+        count = len(self.requests)
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
+            self.verify(before)
+        self.assertEqual(len(self.requests), count + 2)
+        self.objects[target] = original
+
+        def fail_storage(host, **kwargs):
+            if host == remote.STORAGE_HOST:
+                raise OSError("synthetic_SIGNED_storage_error")
+            return self.connect(host, **kwargs)
+
+        self.http.side_effect = fail_storage
+        count = len(self.requests)
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$") as refusal:
+            self.verify(before)
+        self.assertTrue(refusal.exception.__suppress_context__)
+        self.assertEqual(len(self.requests), count + 1)
 
     def test_index_unknown_fields_entities_encodings_duplicates_and_bad_timestamp_refuse(self):
         identity = self.identities[0]

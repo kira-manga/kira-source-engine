@@ -505,10 +505,14 @@ of passing qualification; the separate diagnostic below fixes only its own appro
 
 The existing `publish.yml` also offers an explicit `access_check=true` dispatch with
 `selection={}`. It exercises the fixed `source-publication` native approval boundary
-and two bounded read-only requests using the built-in package-read job token. It has
-no checkout, stored secrets, artifact, publisher output or write permission, and skips
-the publisher jobs. A successful job means the diagnostic completed, **not** that its
-reported HTTP requests succeeded, a version is unused, or publication was approved.
+and bounded read-only requests using the built-in package-read job token. A sparse
+checkout of the exact workflow commit additionally exercises the actual reader on
+the known `0.1.0` POM, requiring its coordinates to match and reporting only byte
+size/hash. Registry credentials never reach the one permitted HTTPS storage hop.
+The disposable checkout is removed immediately. There are no stored secrets,
+artifacts, publisher outputs or write permissions, and publisher jobs are skipped.
+A successful job proves the known POM reader check passed, **not** that every other
+reported HTTP request succeeded, a version is unused, or publication was approved.
 Inspect the actual approval metadata and individual HTTP observations. This check
 does not replace the scoped policy-read credential or any normal publication gate.
 
