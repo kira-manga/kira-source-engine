@@ -479,7 +479,7 @@ PYTHONPATH=.github/scripts python3 -B -m unittest \
 `publisher_publication_intake.publisher_preflight(...)` and `publisher_recheck(...)`
 reuse actual connected candidate intake, acquire fresh publisher/policy observations,
 and finally reread local source/archive bytes and existing tag/ancestry proof. Recheck
-repeats native verification and official GETs before comparing the earlier projection;
+repeats native verification and official receipt/policy reads before comparing the earlier projection;
 it cannot reuse a saved PASS. The independent selection contains `producer`, `publisher`,
 `protection`, `app_parity_ref` and `backend_parity_ref`. The publisher is a **separate**
 exact repository/run/workflow/ref/SHA tuple: dispatch, attempt 1, currently in progress,
@@ -487,16 +487,39 @@ not the completed producer. The future trusted workflow must supply its own invo
 No operational environment, reviewer, version, publisher branch or parity evidence is selected
 by this source. Parity references are bounded bindings, not assertions of passing qualification.
 
-The separate `acquire_publisher_policy` API uses only the existing bounded fixed-host GET
-transport. It requires explicitly selected User reviewer IDs, self-review prevention,
+The separate `acquire_publisher_policy` API reuses the bounded fixed-host transport.
+It requires explicitly selected User reviewer IDs, self-review prevention,
 admin-bypass denial, one literal publisher-branch policy and exact protected branch
-tips/review counts/status-check app identities. Missing review-bypass proof, unknown rules,
-HTTP errors or changed tag/lineage facts refuse; no discovery or fallback is performed.
+tips/review counts/status-check app identities. Missing proof, unknown rules, HTTP errors
+or changed tag/lineage facts refuse; no policy discovery is performed.
+
+Branch selections retain `name`, `tip`, `approvals` and `checks`, with one optional
+`bypass_rule_id`: an independently selected 1–256-character non-whitespace printable
+ASCII opaque node ID. It is required **only if REST omits**
+`bypass_pull_request_allowances`. An explicit REST object must still contain exactly
+empty `users`, `teams` and `apps` lists; present null, malformed or nonempty values refuse
+without fallback. The existing explicit-empty/anonymous GET path needs no new selection.
+When absent, one fixed read-only query POSTs to `https://api.github.com/graphql` for
+that exact selected qualified branch ref. Only the same explicitly supplied read token
+is used; no ambient credential or saved proof is accepted. The query fixes the Engine
+repository and selects its numeric ID, ref and effective protection rule. The response
+must match the selected repository ID, full repository name, branch name, rule node ID
+and literal branch rule pattern. Closed data, integer zero total count, an empty node
+list and `hasNextPage=false` are all required. GraphQL errors (even with partial data),
+null/extra fields, wildcard rules and incomplete lists refuse. Both selected branches
+are checked independently; recheck reacquires the query rather than reusing a proof.
+The same TLS, timeout, 8MiB response, cache/Age and cleanup controls apply, with no
+redirects or retries. Actual Engine rule IDs and token field visibility must be selected
+and verified legitimately later; synthetic tests are not evidence of live compatibility.
+
 The old three-GET environment observation API is unchanged. These sequential observations
 are neither atomic nor native approval: workflow placement behind genuine environment
 approval, later writer-boundary rechecks, all-writer/unused-GAV authority, remote Maven
 readback and consumer acceptance remain separate. Both full calls require a fresh checkout,
 before Gradle restoration, and keep the unconditional Stage C hold. No CLI, credential
-discovery, workflow or publisher activation was added; explicit read tokens only reach GETs.
+discovery, workflow or publisher activation was added; explicit read tokens only reach
+the fixed official API, never native verification or Git.
 Focused synthetic classes are `test_publisher_publication_intake.PublisherIntakeTests` and
-`test_github_publication_receipts.PublisherPolicyAcquisitionTests`; no live approval follows.
+`test_github_publication_receipts.PublisherPolicyAcquisitionTests`. The new query boundary
+is covered by `test_github_branch_bypass_proof.BranchBypassProofTests` and the caller's
+`test_recheck_reacquires_each_bypass_proof_and_binds_selected_rule_ids` method; no live approval follows.

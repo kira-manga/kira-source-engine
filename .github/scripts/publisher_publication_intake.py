@@ -72,7 +72,7 @@ def _projection_bytes(value):
 def publisher_preflight(root, selection, archive, gh_asset, attestation, *, token=None):
     """Validate actual connected intake and live policy; return only a comparison projection.
 
-    Explicit token goes only to the fixed-host GET adapter, never native verification/Git.
+    Explicit token goes only to the fixed-host API adapter, never native verification/Git.
     This requires a fresh checkout. No workflow, environment approval or writer is invoked.
     """
     try:

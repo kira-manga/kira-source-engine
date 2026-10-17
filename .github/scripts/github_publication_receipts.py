@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import http.client
+import json
 import re
 import ssl
 import time
@@ -14,10 +15,24 @@ API_HOST = "api.github.com"
 SOCKET_TIMEOUT = 15
 READ_SECONDS = 30
 PUBLISHER_WORKFLOW = ".github/workflows/publish.yml"
+BYPASS_QUERY = (
+    'query BranchBypass($qualifiedName: String!) { '
+    'repository(owner:"kira-manga", name:"kira-source-engine") { databaseId nameWithOwner '
+    'ref(qualifiedName:$qualifiedName) { name branchProtectionRule { id pattern '
+    'bypassPullRequestAllowances(first:1) { totalCount nodes { id } pageInfo { hasNextPage } } } } } }'
+)
 
 
-def _get_json(path, token):
-    """Fixed-host, no-proxy/no-redirect GET. DNS uses the host resolver, not a hard deadline."""
+def _request_json(path, token, *, bypass_branch=None):
+    """Fixed-host GET or fixed bypass query; DNS has no separately enforced hard deadline."""
+    body = None
+    if bypass_branch is not None:
+        policy.require(path == "/graphql" and token is not None, "Explicit bypass read token required")
+        _validate_read_token(token)
+        body = json.dumps({"query": BYPASS_QUERY,
+                           "variables": {"qualifiedName": "refs/heads/" + _branch_name(bypass_branch)}},
+                          sort_keys=True, separators=(",", ":")).encode("utf-8")
+        policy.require(len(body) <= 4096, "Bypass request bound exceeded")
     connection = http.client.HTTPSConnection(
         API_HOST, timeout=SOCKET_TIMEOUT, context=ssl.create_default_context())
     response = None
@@ -27,7 +42,11 @@ def _get_json(path, token):
                    "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "kira-publication-receipts"}
         if token is not None:
             headers["Authorization"] = "Bearer " + token
-        connection.request("GET", path, headers=headers)
+        if body is None:
+            connection.request("GET", path, headers=headers)
+        else:
+            headers["Content-Type"] = "application/json"
+            connection.request("POST", "/graphql", body=body, headers=headers)
         response = connection.getresponse()
         policy.require(response.status == 200, "Official receipt HTTP status refused")
         age = response.getheader("Age")
@@ -62,6 +81,10 @@ def _get_json(path, token):
                 response.close()
         finally:
             connection.close()
+
+
+def _get_json(path, token):
+    return _request_json(path, token)
 
 
 def _validate_read_token(token):
@@ -174,6 +197,13 @@ def _checks(values):
     return sorted(result, key=lambda item: item["context"])
 
 
+def _bypass_rule_id(value):
+    # Opaque node identity: do not decode it or infer the selected rule from a response.
+    policy.require(type(value) is str and re.fullmatch(r"[\x21-\x7e]{1,256}", value) is not None,
+                   "Selected bypass rule identity refused")
+    return value
+
+
 def validated_publisher_request(publisher, protection, *, token=None):
     """Copy independently selected facts; no policy discovery or approval is performed."""
     try:
@@ -207,12 +237,16 @@ def validated_publisher_request(publisher, protection, *, token=None):
         branches = protection["branches"]
         policy.require(type(branches) is list and 1 <= len(branches) <= 2, "Selected branches required")
         copied = []
+        branch_fields = {"name", "tip", "approvals", "checks"}
         for item in branches:
-            policy.require(type(item) is dict and set(item) == {"name", "tip", "approvals", "checks"}
+            policy.require(type(item) is dict and set(item) in (branch_fields, branch_fields | {"bypass_rule_id"})
                            and policy.hex_value(item["tip"], 40), "Branch selection refused")
             policy.require(_selected_id(item["approvals"]) <= 6, "Review count refused")
-            copied.append({"name": _branch_name(item["name"]), "tip": item["tip"],
-                           "approvals": item["approvals"], "checks": _checks(item["checks"])})
+            branch_selection = {"name": _branch_name(item["name"]), "tip": item["tip"],
+                                "approvals": item["approvals"], "checks": _checks(item["checks"])}
+            if "bypass_rule_id" in item:
+                branch_selection["bypass_rule_id"] = _bypass_rule_id(item["bypass_rule_id"])
+            copied.append(branch_selection)
         policy.require(len({item["name"] for item in copied}) == len(copied)
                        and {item["name"] for item in copied} == {policy.BRANCH, branch}, "Lineage branches refused")
         policy.require(next(item["tip"] for item in copied if item["name"] == branch) == publisher["source_sha"],
@@ -263,6 +297,7 @@ def _reviewer_protection(value, selected):
 
 
 def _branch_protection(value, selected):
+    """Validate REST protection; return whether the absent bypass field needs fresh proof."""
     for key, enabled in (("enforce_admins", True), ("allow_force_pushes", False), ("allow_deletions", False)):
         policy.require(type(value.get(key)) is dict and value[key].get("enabled") is enabled, "Branch policy refused")
     reviews = value.get("required_pull_request_reviews")
@@ -270,22 +305,51 @@ def _branch_protection(value, selected):
                    and reviews.get("require_last_push_approval") is True
                    and type(reviews.get("required_approving_review_count")) is int
                    and reviews["required_approving_review_count"] == selected["approvals"], "Branch review policy refused")
-    bypass = reviews.get("bypass_pull_request_allowances")
-    policy.require(type(bypass) is dict and set(bypass) == {"users", "teams", "apps"}
-                   and all(type(items) is list and not items for items in bypass.values()), "Explicit zero bypass required")
+    needs_proof = "bypass_pull_request_allowances" not in reviews
+    if not needs_proof:
+        bypass = reviews["bypass_pull_request_allowances"]
+        policy.require(type(bypass) is dict and set(bypass) == {"users", "teams", "apps"}
+                       and all(type(items) is list and not items for items in bypass.values()),
+                       "Explicit zero bypass required")
     checks = value.get("required_status_checks")
     policy.require(type(checks) is dict and checks.get("strict") is True
                    and _checks(checks.get("checks")) == selected["checks"], "Required check policy changed")
     contexts = checks.get("contexts")
     policy.require(type(contexts) is list and all(type(item) is str for item in contexts)
                    and sorted(contexts) == [item["context"] for item in selected["checks"]], "Ambiguous check contexts")
+    return needs_proof
+
+
+def _bypass_object(value, fields):
+    policy.require(type(value) is dict and set(value) == fields, "Incomplete bypass proof refused")
+    return value
+
+
+def _acquire_branch_bypass(selected, repository_id, token):
+    policy.require("bypass_rule_id" in selected, "Independently selected bypass rule required")
+    proof = _request_json("/graphql", token, bypass_branch=selected["name"])
+    proof = _bypass_object(proof, {"data"})  # Errors, extensions and partial/aliased data refuse.
+    data = _bypass_object(proof["data"], {"repository"})
+    repo = _bypass_object(data["repository"], {"databaseId", "nameWithOwner", "ref"})
+    policy.require(type(repo["databaseId"]) is int and repo["databaseId"] == repository_id
+                   and repo["nameWithOwner"] == policy.REPOSITORY, "Bypass repository identity refused")
+    ref = _bypass_object(repo["ref"], {"name", "branchProtectionRule"})
+    policy.require(ref["name"] == selected["name"], "Bypass ref identity refused")
+    rule = _bypass_object(ref["branchProtectionRule"], {"id", "pattern", "bypassPullRequestAllowances"})
+    policy.require(rule["id"] == selected["bypass_rule_id"] and rule["pattern"] == selected["name"],
+                   "Exact selected bypass rule required")
+    allowances = _bypass_object(rule["bypassPullRequestAllowances"], {"totalCount", "nodes", "pageInfo"})
+    page = _bypass_object(allowances["pageInfo"], {"hasNextPage"})
+    policy.require(type(allowances["totalCount"]) is int and allowances["totalCount"] == 0
+                   and type(allowances["nodes"]) is list and not allowances["nodes"]
+                   and page["hasNextPage"] is False, "Explicit complete zero bypass proof required")
 
 
 def acquire_publisher_policy(publisher, protection, *, token=None):
     """Fresh comparison-only facts. Neither API equality nor this projection proves approval.
 
-    Missing reviewer/bypass/lineage proof refuses; no discovery/fallback API is used.
-    Multiple GETs are not atomic and cannot reserve a policy, ref or invocation.
+    Only an absent REST bypass field may use the fixed, selected-rule GraphQL proof.
+    Missing/malformed proof refuses; sequential reads cannot reserve policy/ref/invocation.
     """
     try:
         publisher, protection = validated_publisher_request(publisher, protection, token=token)
@@ -311,7 +375,8 @@ def acquire_publisher_policy(publisher, protection, *, token=None):
             policy.require(actual.get("name") == item["name"] and actual.get("protected") is True
                            and type(actual.get("commit")) is dict and actual["commit"].get("sha") == item["tip"],
                            "Remote protected branch changed")
-            _branch_protection(_get_json(path + "/protection", token), item)
+            if _branch_protection(_get_json(path + "/protection", token), item):
+                _acquire_branch_bypass(item, publisher["repository_id"], token)
         _publisher_run(_get_json(run, token), publisher)
         return {"publisher": publisher, "environment": observed, "branches": protection["branches"], "tag": tag}
     except Exception:

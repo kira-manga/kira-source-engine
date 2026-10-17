@@ -9,6 +9,7 @@ import github_publication_receipts as receipts
 import publication_policy as policy
 import publisher_publication_intake as publisher
 import test_connected_publication_intake as connected_fixtures
+import test_github_branch_bypass_proof as bypass_fixtures
 import test_github_publication_receipts as http_fixtures
 import test_publication_policy as fixtures
 
@@ -116,6 +117,31 @@ class PublisherIntakeTests(fixtures.OwnedFixture):
         self.assertEqual(self.archive_check.call_count, 6)
         self.assertEqual(self.lineage.call_count, 2)
         self.assert_cleaned()
+
+    def test_recheck_reacquires_each_bypass_proof_and_binds_selected_rule_ids(self):
+        protection = self.selection["protection"]
+        bypass_fixtures.select_rule_ids(protection)
+        values = bypass_fixtures.bypass_values(self.selection["publisher"], protection)
+        self.reset_responses(values)
+        before = self.preflight(bypass_fixtures.TOKEN)
+        self.assertEqual(before["selection"]["protection"], protection)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assert_cleaned()
+        self.reset_responses(values)
+        self.assertEqual(self.recheck(before, bypass_fixtures.TOKEN), before)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assertEqual(self.native.call_count, 2)
+        self.assert_cleaned()
+        # New live zero-bypass proof is not enough if independently selected rule identity changed.
+        protection["branches"][0]["bypass_rule_id"] = "BPR_synthetic_replacement"
+        values = bypass_fixtures.bypass_values(self.selection["publisher"], protection)
+        self.reset_responses(values)
+        self.assert_refused("recheck", before, bypass_fixtures.TOKEN)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assertEqual(self.native.call_count, 3)
+        self.assertEqual(self.lineage.call_count, 3)
+        self.assertNotIn(bypass_fixtures.TOKEN, repr(self.native.call_args))
+        self.assertNotIn(bypass_fixtures.TOKEN, repr(self.lineage.call_args))
 
     def test_selection_is_deep_copied_and_read_token_reaches_only_official_gets(self):
         original = copy.deepcopy(self.selection)
