@@ -114,7 +114,7 @@ jobs:
           owner = dict(repository=os.environ['GITHUB_REPOSITORY'], run_id=os.environ['GITHUB_RUN_ID'],
                        run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha=os.environ['GITHUB_SHA'], root=str(root))
           assert not root.is_symlink() and json.loads((root / 'owner.json').read_text()) == owner
-          devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=30))['devices']
+          devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=120))['devices']
           choices = [(runtime, device) for runtime, group in devices.items()
                      if re.fullmatch(r'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+', runtime)
                      for device in group if device.get('isAvailable') and device.get('deviceTypeIdentifier', '').startswith('com.apple.CoreSimulator.SimDeviceType.iPhone-')]
