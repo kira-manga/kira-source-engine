@@ -328,7 +328,7 @@ trigger/permission/action/phase review remains a separate obligation.
 | Gate | Still open; not implemented or waived by containment |
 |---|---|
 | External write authority | Owner-established effective package-write exclusion, including historical/alternate workflows and other writers. Restricted token defaults or an environment-held credential alone are not that boundary. Historical protection failures and package403 are not current capability or absence proof; no settings/token workaround is authorized. |
-| Approval and protected identity | Genuine private approval/attestation capability; a pre-existing protected environment with required reviewers, self-review prevention, no bypass and an explicit publisher-branch policy; protected main ancestry and distinct approved publisher/producer workflow revisions. Environment existence or manual dispatch alone is not approval. |
+| Approval and protected identity | Genuine GitHub approval/attestation capability; a pre-existing protected environment with required reviewers, owner-authorized self-approval (`prevent_self_review=false`), no admin bypass and an explicit publisher-branch policy; protected main ancestry and distinct approved publisher/producer workflow revisions. Environment existence or manual dispatch alone is not approval. |
 | Release version and provenance | Owner-approved committed canonical version matching tag/project/publications; exact peeled source SHA/tree, repository/workflow/run/attempt/artifact/digest identity, successful trusted CI and verified signed subject/signer/source identity. Recheck mutable facts after approval; author-written PASS JSON is not provenance. |
 | Complete native outgoing bytes | A separately proven pre-first-write gate for the complete three-module root/Android/JVM/Apple publication set: binaries, sources, POMs, `.module` links and deterministic sidecars, with mutable Maven index semantics handled separately. Preserve native Gradle components and byte identity even for direct single-publication requests; no custom uploader, dropped targets, hash normalization or relabelled rebuilds. |
 | Registry and partial releases | Authoritatively unused complete target GAV set, effective serialization against other writers and an explicit non-atomic multi-publication failure policy. HTTP401/403/errors do not prove absence. No overwrite, deletion, retagging, workflow/release-level retry/resume or partial-version reuse is authorized. |
@@ -435,7 +435,7 @@ are reused. The result projects observed identity/mode/policies only, not raw re
 A future StageC pre-first-write caller can reacquire this independently selected publisher
 configuration alongside completed-byte intake; current producer receipts do not read it.
 There is no new CLI, receipt format or caller, and no workflow consumes this dormant entry
-point. Reviewer membership, self-review prevention, administrator bypass and actual run approval
+point. Reviewer membership, the self-review setting, administrator bypass and actual run approval
 are **not proved**; missing bypass metadata is not false. The policy list is read once:
 the last environment read neither revalidates nor freezes that list. Matching observations
 are not an atomic snapshot, reservation, authority or release permission. StageC's unconditional
@@ -499,11 +499,21 @@ it cannot reuse a saved PASS. The independent selection contains `producer`, `pu
 `protection`, `app_parity_ref` and `backend_parity_ref`. The publisher is a **separate**
 exact repository/run/workflow/ref/SHA tuple: dispatch, attempt 1, currently in progress,
 not the completed producer. The future trusted workflow must supply its own invocation.
-No operational environment, reviewer, version, publisher branch or parity evidence is selected
-by this source. Parity references are bounded bindings, not assertions of passing qualification.
+The normal publisher intake still selects no operational environment, reviewer, version,
+publisher branch or parity evidence. Parity references are bounded bindings, not assertions
+of passing qualification; the separate diagnostic below fixes only its own approval environment.
+
+The existing `publish.yml` also offers an explicit `access_check=true` dispatch with
+`selection={}`. It exercises the fixed `source-publication` native approval boundary
+and two bounded read-only requests using the built-in package-read job token. It has
+no checkout, stored secrets, artifact, publisher output or write permission, and skips
+the publisher jobs. A successful job means the diagnostic completed, **not** that its
+reported HTTP requests succeeded, a version is unused, or publication was approved.
+Inspect the actual approval metadata and individual HTTP observations. This check
+does not replace the scoped policy-read credential or any normal publication gate.
 
 The separate `acquire_publisher_policy` API reuses the bounded fixed-host transport.
-It requires explicitly selected User reviewer IDs, self-review prevention,
+It requires explicitly selected User reviewer IDs, explicit `prevent_self_review=false` (owner-authorized),
 admin-bypass denial, one literal publisher-branch policy and exact protected branch
 tips/review counts/status-check app identities. Missing proof, unknown rules, HTTP errors
 or changed tag/lineage facts refuse; no policy discovery is performed.

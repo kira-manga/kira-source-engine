@@ -276,6 +276,16 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
     def test_workflow_uses_trusted_control_conditional_environment_exact_artifacts_and_no_writer(self):
         source = (Path(__file__).resolve().parents[1] / "workflows/publish.yml").read_text()
         self.assertIn("workflow_dispatch:", source)
+        self.assertIn("${{ inputs.access_check && github.event_name == 'workflow_dispatch'", source)
+        self.assertIn("${{ !inputs.access_check && github.event_name == 'workflow_dispatch'", source)
+        probe = source.split("  approval-and-access-check:", 1)[1].split("  preflight:", 1)[0]
+        self.assertIn("environment: source-publication", probe)
+        self.assertIn("packages: read", probe)
+        self.assertNotIn("secrets.", probe)
+        self.assertNotIn("outputs:", probe)
+        self.assertNotIn("uses:", probe)
+        self.assertIn("class NoRedirect", probe)
+        self.assertIn("timeout=10", probe)
         self.assertIn("github.repository_id == '1310736214'", source)
         self.assertIn("github.ref == 'refs/heads/remediation/production-readiness-2026-09-04'", source)
         self.assertIn("# Remote package publication is disabled", source)

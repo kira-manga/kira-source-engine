@@ -11,6 +11,11 @@ on:
         description: Exact producer tuple, source_branch_tip, tag_object and two parity references (no policy or credentials)
         required: true
         type: string
+      access_check:
+        description: Read-only native approval and built-in package-read check; cannot publish
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,9 +27,67 @@ concurrency:
   cancel-in-progress: false # This is NOT exclusion of other or out-of-band writers.
 
 jobs:
+  approval-and-access-check:
+    if: >-
+      ${{ inputs.access_check && github.event_name == 'workflow_dispatch' &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_id == '1310736214' &&
+          github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    # Fixed, owner-authorized environment. This job has no publisher outputs or write authority.
+    environment: source-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Observe existing built-in package access after genuine native approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import base64, hashlib, json, os, ssl, urllib.error, urllib.request
+          token, actor = os.environ.pop('GH_TOKEN'), os.environ.pop('GH_ACTOR')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
+              urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+          basic = base64.b64encode((actor + ':' + token).encode()).decode()
+          requests = (
+              ('package_inventory', 'https://api.github.com/orgs/kira-manga/packages?package_type=maven&per_page=100', 'Bearer ' + token),
+              ('published_0_1_pom', 'https://maven.pkg.github.com/kira-manga/kira-source-engine/me/manga/kira/source/source-engine/0.1.0/source-engine-0.1.0.pom', 'Basic ' + basic),
+          )
+          for name, url, auth in requests:
+              result = {'check': name, 'read_only': True}
+              try:
+                  req = urllib.request.Request(url, headers={'Authorization': auth,
+                      'User-Agent': 'Kira-publication-access-check', 'X-GitHub-Api-Version': '2022-11-28'})
+                  try:
+                      response = opener.open(req, timeout=10)
+                  except urllib.error.HTTPError as error:
+                      response = error
+                  with response:
+                      body = response.read(1048577)
+                      result.update(status=response.status, within_bound=len(body) <= 1048576,
+                          complete_page=response.headers.get('Link') is None)
+                      if response.status == 200 and len(body) <= 1048576:
+                          result['sha256'] = hashlib.sha256(body).hexdigest()
+                          if name == 'package_inventory':
+                              items = json.loads(body)
+                              result['visible_engine_packages'] = sum(
+                                  (item.get('repository') or {}).get('id') == 1310736214 for item in items)
+              except Exception as error:
+                  result['error_class'] = type(error).__name__
+              print('KIRA_PUBLICATION_ACCESS ' + json.dumps(result, sort_keys=True))
+          PY
+
   preflight:
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
+      ${{ !inputs.access_check && github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
           github.repository_id == '1310736214' && github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' &&
           github.repository_owner == 'kira-manga' && github.run_attempt == 1 &&
           github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
@@ -119,6 +182,7 @@ jobs:
           needs.preflight.outputs.record_artifact_id != '' }}
     # Only successful preflight against the trusted control policy may produce this name.
     # Never use inputs.selection or API-discovered defaults as an environment selector.
+    # The owner permits initiator approval; required named review and no admin bypass remain.
     environment:
       name: ${{ needs.preflight.outputs.environment }}
     runs-on: macos-latest

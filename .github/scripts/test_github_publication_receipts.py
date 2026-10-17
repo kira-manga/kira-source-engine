@@ -47,7 +47,7 @@ def publisher_policy_values(publisher=None, protection=None):
     selected = protection["environment"]
     env = {"id": selected["id"], "name": selected["name"], "can_admins_bypass": False,
            "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
-           "protection_rules": [{"type": "required_reviewers", "prevent_self_review": True,
+           "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
                                  "reviewers": [{"type": "User", "reviewer": {"type": "User", "id": identity}}
                                                for identity in selected["reviewer_ids"]]}, {"type": "branch_policy"}],
            "url": "https://untrusted.invalid/ignored", "note": "synthetic_PRIVATE_response"}
@@ -459,6 +459,7 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
         self.assertEqual(result["publisher"], selected_publisher)
         self.assertEqual(result["branches"], selected_protection["branches"])
         self.assertEqual(result["environment"]["reviewer_ids"], [81, 82])
+        self.assertIs(result["environment"]["prevent_self_review"], False)
         self.assertNotIn("approved", json.dumps(result))
         self.assertNotIn("synthetic_", json.dumps(result))
         self.assertTrue(all(kwargs["headers"]["Authorization"] == "Bearer synthetic_READ_TOKEN"
@@ -500,9 +501,10 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
                     self.assertRefused()
                     self.assertEqual(len(self.requests), index + 1)
 
-    def test_both_environment_reads_require_explicit_named_nonbypass_nonself_proof(self):
+    def test_both_environment_reads_require_explicit_named_nonbypass_self_approval_policy(self):
         for index in (1, 3):
-            for kind in ("missing-bypass", "bypass", "self-review", "reviewer", "team", "missing-rules", "unknown-rule"):
+            for kind in ("missing-bypass", "bypass", "self-review", "missing-self-review", "null-self-review",
+                         "numeric-self-review", "text-self-review", "reviewer", "team", "missing-rules", "unknown-rule"):
                 with self.subTest(index=index, kind=kind):
                     values = publisher_policy_values()
                     env = values[index]
@@ -511,7 +513,12 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
                     elif kind == "bypass":
                         env["can_admins_bypass"] = True
                     elif kind == "self-review":
-                        env["protection_rules"][0]["prevent_self_review"] = False
+                        env["protection_rules"][0]["prevent_self_review"] = True
+                    elif kind == "missing-self-review":
+                        del env["protection_rules"][0]["prevent_self_review"]
+                    elif kind in ("null-self-review", "numeric-self-review", "text-self-review"):
+                        env["protection_rules"][0]["prevent_self_review"] = {
+                            "null-self-review": None, "numeric-self-review": 0, "text-self-review": "false"}[kind]
                     elif kind == "reviewer":
                         env["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 83
                     elif kind == "team":

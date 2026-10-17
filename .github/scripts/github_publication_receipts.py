@@ -285,7 +285,9 @@ def _reviewer_protection(value, selected):
     policy.require(kinds.count("required_reviewers") == 1 and kinds.count("branch_policy") <= 1
                    and all(kind in ("required_reviewers", "branch_policy") for kind in kinds), "Unknown protection rule")
     rule = next(rule for rule in rules if rule["type"] == "required_reviewers")
-    policy.require(rule.get("prevent_self_review") is True, "Self-review prevention required")
+    # Owner permits the authorized initiator to approve; an actual named approval
+    # is still required by the native environment boundary, never inferred here.
+    policy.require(rule.get("prevent_self_review") is False, "Explicit owner-authorized self-approval policy required")
     reviewers = rule.get("reviewers")
     policy.require(type(reviewers) is list and len(reviewers) == len(selected["reviewer_ids"]), "Reviewer list changed")
     identities = []
@@ -294,7 +296,7 @@ def _reviewer_protection(value, selected):
                        and item["reviewer"].get("type") == "User", "Named user reviewer required")
         identities.append(_selected_id(item["reviewer"].get("id")))
     policy.require(sorted(identities) == selected["reviewer_ids"], "Selected reviewer identity changed")
-    return {"reviewer_ids": sorted(identities), "prevent_self_review": True,
+    return {"reviewer_ids": sorted(identities), "prevent_self_review": False,
             "can_admins_bypass": False, "rule_types": sorted(kinds)}
 
 
