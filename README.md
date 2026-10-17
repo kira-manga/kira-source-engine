@@ -268,11 +268,22 @@ exact archive and inventory subjects against independently measured bytes. It do
 workflow-controlled predicate metadata as signer/source/invocation authority. Decoded DSSE,
 `attested: true`, log text, supplied “verified” JSON or exit0 without those comparisons refuse.
 
-The native adapter admits only the official Linux-amd64
-[`gh_2.100.0_linux_amd64.tar.gz`](https://github.com/cli/cli/releases/tag/v2.100.0), SHA256
-`e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be`. It makes no acquisition,
-uses no ambient `gh` or token/config, and copies only the fixed executable member into an
-owned temporary directory after checking that asset pin. Later native verification may refresh
+The native adapter selects only these official CLI v2.100.0 assets by the actual host:
+
+- Linux/x86_64: [`gh_2.100.0_linux_amd64.tar.gz`](https://github.com/cli/cli/releases/tag/v2.100.0),
+  SHA256 `e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be`, member
+  `gh_2.100.0_linux_amd64/bin/gh` (unchanged).
+- Darwin/arm64: [`gh_2.100.0_macOS_arm64.zip`](https://github.com/cli/cli/releases/tag/v2.100.0),
+  SHA256 `45f9a62da2f6e641a7fad57e2ce39656dfd7ef331372d80a2a2aed65abb01642`, member
+  `gh_2.100.0_macOS_arm64/bin/gh`. The official release API, checksum list and acquired archive
+  agree on this pin; the ZIP's executable is a Unix regular file. No other ZIP member is extracted.
+
+Unsupported hosts, wrong-platform assets and archive/member bounds fail closed; no PATH binary,
+format autodetection or translated-platform fallback is used. Darwin support is not a claim of
+actual macOS signature-verification qualification; that requires a separately admitted real candidate.
+The adapter makes no acquisition, uses no ambient `gh` or token/config, and copies only the fixed
+executable member into an owned temporary directory after checking that asset pin. Both archive
+and executable bounds remain 64MiB, with at most 4096 entries. Later native verification may refresh
 public trust roots; it is not claimed to be network-isolated. Its flags and strict output
 adapter follow [CLI source `45437bc7`](https://github.com/cli/cli/blob/45437bc7eeeb3359bbfddd1742f79de7652fd3e2/pkg/cmd/attestation/verify/verify.go)
 and [sigstore-go `22d3691c`](https://github.com/sigstore/sigstore-go/blob/22d3691c7b8e0c5530fae3c05577690bfef5cd00/pkg/fulcio/certificate/summarize.go)

@@ -21,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 import types
+import zipfile
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
@@ -68,6 +69,9 @@ BOOTSTRAP_FILES = {
 GH_ASSET = "gh_2.100.0_linux_amd64.tar.gz"
 GH_ASSET_SHA256 = "e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be"
 GH_MEMBER = "gh_2.100.0_linux_amd64/bin/gh"
+GH_DARWIN_ASSET = "gh_2.100.0_macOS_arm64.zip"
+GH_DARWIN_ASSET_SHA256 = "45f9a62da2f6e641a7fad57e2ce39656dfd7ef331372d80a2a2aed65abb01642"
+GH_DARWIN_MEMBER = "gh_2.100.0_macOS_arm64/bin/gh"
 
 
 class Refusal(ValueError):
@@ -726,17 +730,40 @@ def _verified_policy(document, expected):
             all(s.get("digest") == wanted[s["name"]] for s in subjects), "Verified subject/digest mismatch")
 
 
+def _darwin_verifier_bytes(asset_bytes):
+    """Read only the fixed regular executable from already hash-admitted ZIP bytes."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(asset_bytes)) as package:
+            members = package.infolist()
+            require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
+            matches = [member for member in members if member.filename == GH_DARWIN_MEMBER]
+            require(len(matches) == 1, "Pinned native executable missing/invalid")
+            member = matches[0]
+            require(member.create_system == 3 and stat.S_ISREG(member.external_attr >> 16)
+                    and not member.is_dir() and not member.flag_bits & 1
+                    and member.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                    and 0 < member.file_size <= MAX_META * 8, "Pinned native executable missing/invalid")
+            with package.open(member) as stream:
+                data = stream.read(MAX_META * 8 + 1)
+            require(len(data) == member.file_size, "Pinned native executable length mismatch")
+            return data
+    except Exception:
+        raise Refusal("Pinned native ZIP refused") from None
+
+
 def native_verify(gh_asset, bundle, subjects, expected):
     """No PATH gh, download, token or guessed schema fallback. Caller separately admits this asset.
 
     Signature/certificate verification runs BEFORE interpreting native JSON. Public trust-root
     refresh by gh may require network; this is not advertised as network-isolated verification.
     """
-    require(platform.system() == "Linux" and platform.machine() == "x86_64", "Pinned verifier host mismatch")
+    host = (platform.system(), platform.machine())
+    pins = {("Linux", "x86_64"): GH_ASSET_SHA256, ("Darwin", "arm64"): GH_DARWIN_ASSET_SHA256}
+    require(host in pins, "Pinned verifier host mismatch")
     asset = regular(gh_asset)
     with asset.open("rb") as stream:
         asset_bytes = stream.read(MAX_META * 8 + 1)
-    require(len(asset_bytes) <= MAX_META * 8 and digest(asset_bytes) == GH_ASSET_SHA256,
+    require(len(asset_bytes) <= MAX_META * 8 and digest(asset_bytes) == pins[host],
             "Official native verifier asset pin mismatch")
     bundle = regular(bundle)
     require(bundle.suffix in (".json", ".jsonl"), "Native bundle must be JSON/JSONL")
@@ -744,14 +771,17 @@ def native_verify(gh_asset, bundle, subjects, expected):
     with tempfile.TemporaryDirectory(prefix="kira-native-verifier-") as temp:
         temp = Path(temp)
         # Read the SAME pinned immutable bytes, not a second open of a replaceable path.
-        with tarfile.open(fileobj=io.BytesIO(asset_bytes), mode="r:gz") as package:
-            members = package.getmembers()
-            require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
-            matches = [m for m in members if m.name == GH_MEMBER]
-            require(len(matches) == 1 and matches[0].isreg() and 0 < matches[0].size <= MAX_META * 8,
-                    "Pinned native executable missing/invalid")
-            binary = temp / "gh"
-            write_new(binary, package.extractfile(matches[0]).read(MAX_META * 8 + 1))
+        binary = temp / "gh"
+        if host == ("Linux", "x86_64"):
+            with tarfile.open(fileobj=io.BytesIO(asset_bytes), mode="r:gz") as package:
+                members = package.getmembers()
+                require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
+                matches = [m for m in members if m.name == GH_MEMBER]
+                require(len(matches) == 1 and matches[0].isreg() and 0 < matches[0].size <= MAX_META * 8,
+                        "Pinned native executable missing/invalid")
+                write_new(binary, package.extractfile(matches[0]).read(MAX_META * 8 + 1))
+        else:
+            write_new(binary, _darwin_verifier_bytes(asset_bytes))
         binary.chmod(0o700)
         local_bundle = temp / ("bundle" + bundle.suffix)
         write_new(local_bundle, data)

@@ -10,11 +10,13 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import publication_policy as p
 
@@ -840,6 +842,180 @@ class NativeAdapterAndIntakeTests(OwnedFixture):
             (checkout / "gradle.properties").write_text("VERSION_NAME=0.1.0-SNAPSHOT\n")
             with self.assertRaises(p.Refusal):
                 p.completed_intake(checkout, e, receipts(), archive, "unused", "unused")
+
+
+class NativeDarwinAdapterTests(OwnedFixture):
+    """Synthetic ZIPs and mocked subprocesses only; never execute the official macOS binary."""
+
+    def setUp(self):
+        super().setUp()
+        self.asset = self.root / p.GH_DARWIN_ASSET
+        self.bundle = self.root / "fixture.json"
+        self.bundle.write_text('{"fixture":"not a signed bundle"}')
+        self.subjects = [self.root / p.ARCHIVE, self.root / "inventory.tsv"]
+        for subject in self.subjects:
+            subject.write_bytes(b"synthetic subject")
+        self.payload = b"synthetic macOS executable placeholder; NEVER EXECUTED"
+        self.temporary_directories = []
+        self.real_temporary = tempfile.TemporaryDirectory
+        self.system = self.patch(p.platform, "system", return_value="Darwin")
+        self.machine = self.patch(p.platform, "machine", return_value="arm64")
+        self.patch(p.tempfile, "TemporaryDirectory", side_effect=self.native_temporary)
+        self.execute = self.patch(p.subprocess, "run")
+        self.execute.return_value = subprocess.CompletedProcess([], 0, json.dumps(native_output()).encode(), b"")
+        self.write_zip()
+
+    def patch(self, target, name, **kwargs):
+        patcher = mock.patch.object(target, name, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def native_temporary(self, **kwargs):
+        temporary = self.real_temporary(dir=self.root, **kwargs)
+        self.temporary_directories.append(Path(temporary.name))
+        return temporary
+
+    def write_zip(self, entries=None):
+        if entries is None:
+            entries = [(p.GH_DARWIN_MEMBER, self.payload, stat.S_IFREG | 0o755),
+                       ("../not-extracted", b"ignored archive member", stat.S_IFREG | 0o644)]
+        with zipfile.ZipFile(self.asset, "w") as archive:
+            for name, data, mode in entries:
+                member = zipfile.ZipInfo(name)
+                member.create_system = 3
+                member.external_attr = mode << 16
+                member.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(member, data)
+
+    def alter_member(self, offset, width, value):
+        data = bytearray(self.asset.read_bytes())
+        index = data.index(b"PK\x01\x02") + offset
+        data[index:index + width] = value.to_bytes(width, "little")
+        self.asset.write_bytes(data)
+
+    def verify(self):
+        with mock.patch.object(p, "GH_DARWIN_ASSET_SHA256", p.digest(self.asset.read_bytes())):
+            p.native_verify(self.asset, self.bundle, self.subjects, expected())
+
+    def assert_clean(self):
+        self.assertTrue(all(not path.exists() for path in self.temporary_directories))
+        self.assertFalse((self.root / "not-extracted").exists())
+
+    def assert_refused(self):
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        self.execute.assert_not_called()
+        self.assert_clean()
+
+    def test_darwin_zip_uses_pinned_bytes_exact_command_and_private_cleanup(self):
+        commands = []
+
+        def execute(command, **kwargs):
+            binary = Path(command[0])
+            local_bundle = binary.parent / "bundle.json"
+            self.assertEqual(binary.read_bytes(), self.payload)
+            self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o700)
+            self.assertEqual({item.name for item in binary.parent.iterdir()}, {"gh", "bundle.json"})
+            self.assertEqual(local_bundle.read_bytes(), self.bundle.read_bytes())
+            self.assertEqual(command[1:], ["attestation", "verify", str(self.subjects[len(commands)]),
+                "--bundle", str(local_bundle), "--hostname", "github.com", "--repo", p.REPOSITORY,
+                "--format", "json", "--predicate-type", p.PREDICATE, "--cert-identity", p.SIGNER,
+                "--cert-oidc-issuer", p.ISSUER, "--signer-digest", SHA, "--source-ref", p.REF,
+                "--source-digest", SHA, "--deny-self-hosted-runners"])
+            self.assertEqual(kwargs, {"env": {"PATH": os.defpath, "HOME": str(binary.parent),
+                "XDG_CONFIG_HOME": str(binary.parent), "GH_HOST": "github.com",
+                "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}, "check": True,
+                "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 120})
+            commands.append(command)
+            return subprocess.CompletedProcess([], 0, json.dumps(native_output()).encode(), b"")
+
+        original_read = p.read_small
+
+        def replace_asset_after_pin(path):
+            data = original_read(path)
+            self.asset.write_bytes(b"unadmitted replacement after asset read")
+            return data
+
+        self.execute.side_effect = execute
+        with mock.patch.object(p, "read_small", side_effect=replace_asset_after_pin), \
+             mock.patch.dict(os.environ, {"GH_TOKEN": "ignored", "GITHUB_TOKEN": "ignored", "HTTPS_PROXY": "ignored"}):
+            self.verify()
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(self.temporary_directories), 1)
+        self.assert_clean()
+
+    def test_unsupported_platforms_refuse_before_reading_assets(self):
+        with mock.patch.object(p, "regular") as read:
+            for system, machine in (("Darwin", "x86_64"), ("Darwin", "aarch64"), ("Linux", "arm64"),
+                                    ("Windows", "ARM64"), ("linux", "x86_64")):
+                with self.subTest(system=system, machine=machine), self.assertRaises(p.Refusal):
+                    self.system.return_value, self.machine.return_value = system, machine
+                    p.native_verify(self.asset, self.bundle, self.subjects, expected())
+            read.assert_not_called()
+        self.execute.assert_not_called()
+        self.assertEqual(self.temporary_directories, [])
+
+    def test_darwin_requires_its_own_pin_not_linux_or_an_ambient_binary(self):
+        with mock.patch.object(p, "GH_ASSET_SHA256", p.digest(self.asset.read_bytes())), \
+             mock.patch.dict(os.environ, {"PATH": "/untrusted", "GH_TOKEN": "ignored"}), \
+             self.assertRaises(p.Refusal):
+            p.native_verify(self.asset, self.bundle, self.subjects, expected())
+        self.execute.assert_not_called()
+        self.assertEqual(self.temporary_directories, [])
+
+    def test_archive_and_entry_limits_refuse_before_native(self):
+        self.asset.write_bytes(b"x" * 1025)
+        with mock.patch.object(p, "MAX_META", 128):
+            self.assert_refused()
+        self.assertEqual(self.temporary_directories, [])
+        self.write_zip()
+        with mock.patch.object(p, "MAX_ENTRIES", 1):
+            self.assert_refused()
+        self.assertEqual(len(self.temporary_directories), 1)
+
+    def test_exact_regular_member_and_length_limits_are_enforced(self):
+        regular = (p.GH_DARWIN_MEMBER, self.payload, stat.S_IFREG | 0o755)
+        cases = {"missing": [("other/bin/gh", self.payload, stat.S_IFREG | 0o755)],
+                 "duplicate": [regular, regular],
+                 "symlink": [(p.GH_DARWIN_MEMBER, b"other", stat.S_IFLNK | 0o777)],
+                 "directory": [(p.GH_DARWIN_MEMBER, b"", stat.S_IFDIR | 0o755)],
+                 "empty": [(p.GH_DARWIN_MEMBER, b"", stat.S_IFREG | 0o755)]}
+        for name, entries in cases.items():
+            with self.subTest(case=name):
+                if name == "duplicate":
+                    with self.assertWarns(UserWarning):
+                        self.write_zip(entries)
+                else:
+                    self.write_zip(entries)
+                self.assert_refused()
+        # Mutate real ZIP central-directory fields, not ZipInfo/open mocks.
+        for name, offset, width, value in (("oversized", 24, 4, p.MAX_META * 8 + 1),
+                ("declared-length", 24, 4, len(self.payload) + 1), ("encrypted", 8, 2, 1),
+                ("compression", 10, 2, 99), ("non-unix", 5, 1, 0)):
+            with self.subTest(case=name):
+                self.write_zip([regular])
+                self.alter_member(offset, width, value)
+                self.assert_refused()
+
+    def test_invalid_zip_and_verifier_failures_always_clean(self):
+        self.asset.write_bytes(b"not a ZIP despite an admitted synthetic hash")
+        self.assert_refused()
+        self.write_zip()
+        data = self.asset.read_bytes()
+        checksum_offset = data.index(b"PK\x01\x02") + 16
+        self.alter_member(16, 4, int.from_bytes(data[checksum_offset:checksum_offset + 4], "little") ^ 1)
+        self.assert_refused()
+        self.write_zip()
+        self.execute.return_value = subprocess.CompletedProcess([], 0, b'{"verified":true}', b"")
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        self.assert_clean()
+        self.execute.side_effect = subprocess.CalledProcessError(1, ["mock native verifier"])
+        with mock.patch.object(p, "_verified_policy") as verify_policy:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.verify()
+            verify_policy.assert_not_called()
+        self.assert_clean()
 
 
 class FiniteHoldTests(unittest.TestCase):
