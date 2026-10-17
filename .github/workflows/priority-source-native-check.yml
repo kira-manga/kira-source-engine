@@ -116,7 +116,7 @@ jobs:
         run: python3 -B scripts/release/prepare-libffi-source.py verify
 
       - name: Create one owned simulator from an already installed iOS runtime
-        timeout-minutes: 4
+        timeout-minutes: 9
         run: |
           python3 -B - <<'PY'
           import json, os, pathlib, re, subprocess
@@ -140,7 +140,7 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('KIRA_NATIVE_SIMULATOR=' + udid + '\n')
           subprocess.run(['/usr/bin/xcrun', 'simctl', 'boot', udid], check=True, timeout=30)
-          subprocess.run(['/usr/bin/xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True, timeout=120)
+          subprocess.run(['/usr/bin/xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True, timeout=420)
           PY
 
       - name: Compile device KLIBs and run only affected Native simulator tests
