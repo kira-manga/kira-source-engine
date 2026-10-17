@@ -1,0 +1,356 @@
+name: Priority source Native qualification (no publication)
+
+# Issue branch: restore Lavatoons, Mangatuk, Dilar and Manhwatop. Primary must review
+# this workflow and the corrected source before the one coordinated qualifying push.
+# Source-only follow-up pushes deliberately do not rerun this cold Native gate.
+on:
+  push:
+    branches: [remediation/priority-sources-20261017]
+    paths:
+      - .github/workflows/priority-source-native-check.yml
+      - release/libffi-source.json
+      - scripts/release/prepare-libffi-source.py
+      - scripts/release/libffi-cfi-startproc.patch
+      - scripts/release/libffi-source-smoke.c
+      - scripts/release/tests/libffi-source-test.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kira-priority-source-native-qualification
+  cancel-in-progress: false
+
+jobs:
+  native:
+    if: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.repository_owner == 'kira-manga' && github.repository == 'kira-manga/kira-source-engine' &&
+          github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/priority-source-native-check.yml@refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_sha == github.sha }}
+    runs-on: macos-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact reviewed issue-branch candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Admit source and fresh owned runtime on actual Apple ARM64
+        id: runtime
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, json, os, pathlib, platform, re, subprocess
+          repo = pathlib.Path.cwd()
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
+          assert os.environ['RUNNER_OS'] == 'macOS' and os.environ['RUNNER_ARCH'] == 'ARM64'
+          assert re.fullmatch(r'[1-9][0-9]*', os.environ['GITHUB_RUN_ID'])
+          assert re.fullmatch(r'[1-9][0-9]*', os.environ['GITHUB_RUN_ATTEMPT'])
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
+          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'])
+          outputs = ['.gradle', '.kotlin', 'build', 'source-contract/build', 'source-engine/build', 'source-testkit/build']
+          for relative in outputs:
+              path = repo / relative
+              assert not path.exists() and not path.is_symlink(), 'Generated root is not fresh: ' + relative
+          for name in ['kira-libffi-source', 'kira-libffi-provenance.json']:
+              path = temp / name
+              assert not path.exists() and not path.is_symlink(), 'Bootstrap state is not fresh'
+          # These are the independently reviewed five-file bootstrap, not a prebuilt checksum waiver.
+          pins = {
+              'release/libffi-source.json': '701ab49c3a754e2091b14d52689746593e2186f7e7f9fa3d87b53927fd1a2a79',
+              'scripts/release/prepare-libffi-source.py': '644e5b089610ab56e1dd0cc7ec41e69c874f5fee07caa39789b75172ab597e12',
+              'scripts/release/libffi-cfi-startproc.patch': '327912eda89bf7820cc34f679cedc76894a4a01246cec6e0ab1382161287cbee',
+              'scripts/release/libffi-source-smoke.c': 'e57e6afa455ec5fc1b82424182d6ace58ca6a78418c9b32400d428cefe533e1a',
+              'scripts/release/tests/libffi-source-test.py': '7c33c0d2fc46eb2230ab98404d07376521249d62c86921b6d518b19f1513b7d2',
+          }
+          for relative, expected in pins.items():
+              assert hashlib.sha256((repo / relative).read_bytes()).hexdigest() == expected, 'Bootstrap review drift: ' + relative
+          root = temp / ('kira-priority-native-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          root.mkdir(mode=0o700)
+          owner = {key: os.environ[key] for key in ['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']}
+          (root / 'owner.json').write_text(json.dumps(owner))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('root=' + str(root) + '\n')
+          for name in ['gradle', 'tmp', 'diagnostics']:
+              (root / name).mkdir(mode=0o700)
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'KIRA_NATIVE_ROOT={root}\nGRADLE_USER_HOME={root}/gradle\nTMPDIR={root}/tmp\n')
+          receipt = dict(owner, source_tree=subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                         workflow_sha256=hashlib.sha256((repo / '.github/workflows/priority-source-native-check.yml').read_bytes()).hexdigest(),
+                         bootstrap_files=pins, owned_outputs=outputs, host=platform.platform(),
+                         scope='check-only: no package, app, physical-device or publication qualification')
+          (root / 'diagnostics/source.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          PY
+
+      - name: Set up Java 21 without dependency-cache restoration
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Require installed SDK37 metadata and selected Xcode
+        run: |
+          set -euo pipefail
+          python3 -B .github/scripts/publication_policy.py sdk37
+          /usr/bin/xcodebuild -version | tee "$KIRA_NATIVE_ROOT/diagnostics/xcode.txt"
+          /usr/bin/xcrun --sdk iphoneos --show-sdk-version
+          /usr/bin/xcrun --sdk iphonesimulator --show-sdk-version
+
+      # Do not pre-set KONAN_DATA_DIR or native.home. prepare exports both its
+      # exact owned data path and native.home/cache-off GRADLE_OPTS to GITHUB_ENV.
+      - name: Prepare authenticated source-built libffi and private Kotlin 2.2.21
+        id: bootstrap
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          python3 -B scripts/release/prepare-libffi-source.py prepare 2>&1 | tee "$KIRA_NATIVE_ROOT/diagnostics/bootstrap.log"
+
+      - name: Verify private compiler profile before Native use
+        run: python3 -B scripts/release/prepare-libffi-source.py verify
+
+      - name: Create one owned simulator from an already installed iOS runtime
+        timeout-minutes: 4
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ['KIRA_NATIVE_ROOT'])
+          devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', 'available', '--json'], timeout=30))['devices']
+          choices = [(runtime, device) for runtime, group in devices.items()
+                     if re.fullmatch(r'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+', runtime)
+                     for device in group if device.get('isAvailable') and device.get('deviceTypeIdentifier', '').startswith('com.apple.CoreSimulator.SimDeviceType.iPhone-')]
+          assert choices, 'No installed available iOS/iPhone simulator; no runtime download or target substitution'
+          runtime, device = max(choices, key=lambda pair: tuple(map(int, pair[0].split('.iOS-')[1].split('-'))))
+          name = 'kira-priority-native-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          assert all(d['name'] != name for group in devices.values() for d in group), 'Owned simulator name already exists'
+          reservation = {'name': name, 'runtime': runtime, 'device_type': device['deviceTypeIdentifier']}
+          # Record ownership before create, so a later interruption still has an exact cleanup identity.
+          (root / 'simulator.json').write_text(json.dumps(reservation))
+          udid = subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'create', name, reservation['device_type'], runtime], text=True, timeout=30).strip()
+          assert re.fullmatch(r'[0-9A-Fa-f-]{36}', udid), 'Unexpected simulator identifier'
+          reservation['udid'] = udid
+          (root / 'simulator.json').write_text(json.dumps(reservation))
+          (root / 'diagnostics/simulator.json').write_text(json.dumps(reservation, indent=2) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('KIRA_NATIVE_SIMULATOR=' + udid + '\n')
+          subprocess.run(['/usr/bin/xcrun', 'simctl', 'boot', udid], check=True, timeout=30)
+          subprocess.run(['/usr/bin/xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True, timeout=120)
+          PY
+
+      - name: Compile device KLIBs and run only affected Native simulator tests
+        id: native_tests
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          ./gradlew --continue --no-daemon --no-parallel --max-workers=1 --console=plain \
+            --no-build-cache --no-configuration-cache \
+            "-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8 -Dkira.priority.native.owner=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            -Pkotlin.compiler.execution.strategy=in-process \
+            :source-contract:compileKotlinIosArm64 :source-engine:compileKotlinIosArm64 \
+            :source-engine:iosSimulatorArm64Test --device "$KIRA_NATIVE_SIMULATOR" \
+            --tests me.manga.kira.source.engine.HChaCha20Test \
+            --tests me.manga.kira.source.engine.DilarChapterProtocolTest \
+            --tests me.manga.kira.source.engine.GenericSourceChapterContextTest \
+            --tests me.manga.kira.source.engine.GenericSourceClientScriptJsonTest \
+            --tests me.manga.kira.source.engine.GenericSourceClientChapterPaginationTest \
+            --tests me.manga.kira.source.engine.GenericSourceClientHtmlGoldenTest \
+            --tests me.manga.kira.source.engine.GenericSourceSinglePageTest \
+            --tests me.manga.kira.source.engine.GenericSourceChapterEntriesTest \
+            2>&1 | tee "$KIRA_NATIVE_ROOT/diagnostics/native.log"
+
+      - name: Verify bootstrap isolation after Native use, including failed tests
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        timeout-minutes: 2
+        run: python3 -B scripts/release/prepare-libffi-source.py verify
+
+      - name: Always stop owned workers, preserve evidence and clean owned outputs
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 5
+        env:
+          OWNED_ROOT: ${{ steps.runtime.outputs.root }}
+          NATIVE_OUTCOME: ${{ steps.native_tests.outcome }}
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, json, os, pathlib, shutil, signal, subprocess, time, xml.etree.ElementTree as ET
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          root = pathlib.Path(os.environ['OWNED_ROOT'])
+          repo = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          expected_root = temp / ('kira-priority-native-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          owner = {key: os.environ[key] for key in ['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']}
+          assert root == expected_root and root.is_dir() and not root.is_symlink()
+          assert json.loads((root / 'owner.json').read_text()) == owner
+          assert not repo.is_symlink() and shutil.rmtree.avoids_symlink_attacks
+          evidence = root / 'diagnostics'
+          evidence.mkdir(exist_ok=True)
+          assert not evidence.is_symlink()
+          failures = []
+          def attempt(label, action):
+              try:
+                  action()
+              except Exception as error:
+                  failures.append(label + ': ' + str(error))
+          def run(args, timeout=20):
+              with (evidence / 'cleanup.log').open('a') as log:
+                  process = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                  try:
+                      code = process.wait(timeout=timeout)
+                  except BaseException:
+                      try: os.killpg(process.pid, signal.SIGTERM)
+                      except ProcessLookupError: pass
+                      try:
+                          process.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          try: os.killpg(process.pid, signal.SIGKILL)
+                          except ProcessLookupError: pass
+                          process.wait(timeout=5)
+                      raise
+                  if code:
+                      raise RuntimeError(pathlib.Path(args[0]).name + ' exit ' + str(code))
+          def stop_gradle():
+              home = root / 'gradle'
+              assert not home.is_symlink() and os.environ['GRADLE_USER_HOME'] == str(home)
+              launchers = [p for p in home.glob('wrapper/dists/gradle-9.6.1-bin/*/gradle-9.6.1/bin/gradle') if p.is_file() and not p.is_symlink()]
+              assert len(launchers) <= 1
+              if launchers:
+                  run([str(launchers[0]), '--offline', '--no-daemon', '--stop'], timeout=45)
+              else:
+                  assert not (home / 'daemon').exists(), 'Owned daemon registry has no installed launcher'
+          attempt('owned Gradle stop', stop_gradle)
+          # An interrupted build may leave its daemon alive. Never pkill/global-stop Java.
+          marker = '-Dkira.priority.native.owner=' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          def owned_pids():
+              lines = subprocess.check_output(['/bin/ps', '-axo', 'pid=,command='], text=True, timeout=10).splitlines()
+              return [int(line.split(None, 1)[0]) for line in lines if marker in line.split()[1:]]
+          def reap_owned():
+              for sig in [signal.SIGTERM, signal.SIGKILL]:
+                  for pid in owned_pids():
+                      try: os.kill(pid, sig)
+                      except ProcessLookupError: pass
+                  if not owned_pids(): return
+                  time.sleep(3)
+              assert not owned_pids(), 'Owned Gradle worker remains'
+          attempt('owned worker reap', reap_owned)
+          def preserve_xml():
+              expected = {'HChaCha20Test', 'DilarChapterProtocolTest', 'GenericSourceChapterContextTest',
+                          'GenericSourceClientScriptJsonTest', 'GenericSourceClientChapterPaginationTest',
+                          'GenericSourceClientHtmlGoldenTest', 'GenericSourceSinglePageTest',
+                          'GenericSourceChapterEntriesTest'}
+              directory = repo / 'source-engine/build/test-results/iosSimulatorArm64Test'
+              counts = {}; documents = []; bad = []; files = sorted(directory.glob('*.xml'))
+              assert len(files) <= 64
+              assert all(not p.is_symlink() for p in [repo / 'source-engine', repo / 'source-engine/build', directory.parent, directory])
+              # Preserve every original XML before examining failures, not just the first failing class.
+              for path in files:
+                  assert not path.is_symlink() and path.stat().st_size <= 1024 * 1024
+                  data = path.read_bytes()
+                  (evidence / path.name).write_bytes(data)
+                  documents.append((path.name, data))
+              for filename, data in documents:
+                  try:
+                      assert b'<!DOCTYPE' not in data and b'<!ENTITY' not in data
+                      document = ET.fromstring(data)
+                      for case in document.iter('testcase'):
+                          name = case.attrib['classname'].split('.')[-1].split('[')[0]
+                          counts[name] = counts.get(name, 0) + 1
+                      assert not any(list(document.iter(tag)) for tag in ['failure', 'error', 'skipped'])
+                  except Exception:
+                      bad.append(filename)
+              (evidence / 'native-counts.json').write_text(json.dumps({'outcome': os.environ.get('NATIVE_OUTCOME'), 'tests_by_class': counts, 'failed_or_invalid_xml': bad}, indent=2) + '\n')
+              assert not bad, 'Native failure/error/skip or malformed XML'
+              if os.environ.get('NATIVE_OUTCOME') == 'success':
+                  assert set(counts) == expected and all(counts.values()), 'Missing/unexpected Native class or zero-test success'
+          attempt('Native XML preservation and nonzero coverage', preserve_xml)
+          attempt('unchanged tracked source', lambda: run(['git', '-C', str(repo), 'diff', '--exit-code', '--quiet', 'HEAD', '--']))
+          def remove_simulator():
+              reservation_file = root / 'simulator.json'
+              if not reservation_file.exists(): return
+              reservation = json.loads(reservation_file.read_text())
+              assert reservation['name'] == root.name, 'Simulator reservation differs from this run'
+              devices = json.loads(subprocess.check_output(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], timeout=30))['devices']
+              matches = [d for d in devices.get(reservation['runtime'], []) if d['name'] == reservation['name']]
+              assert len(matches) <= 1, 'Ambiguous owned simulator identity'
+              for device in matches:
+                  assert device['deviceTypeIdentifier'] == reservation['device_type']
+                  assert 'udid' not in reservation or device['udid'] == reservation['udid']
+                  if device['state'] != 'Shutdown':
+                      attempt('owned simulator shutdown', lambda: run(['/usr/bin/xcrun', 'simctl', 'shutdown', device['udid']]))
+                  run(['/usr/bin/xcrun', 'simctl', 'delete', device['udid']])
+          attempt('owned simulator cleanup', remove_simulator)
+          bootstrap = temp / 'kira-libffi-source'
+          def copy_small(source, name):
+              if source.exists():
+                  assert not source.is_symlink() and source.is_file() and source.stat().st_size <= 131072
+                  (evidence / name).write_bytes(source.read_bytes())
+          if not bootstrap.is_symlink():
+              attempt('pre-cleanup bootstrap provenance', lambda: copy_small(bootstrap / 'provenance.json', 'bootstrap-before-cleanup.json'))
+          attempt('marked bootstrap cleanup', lambda: run(['python3', '-B', 'scripts/release/prepare-libffi-source.py', 'cleanup'], timeout=45))
+          provenance = temp / 'kira-libffi-provenance.json'
+          attempt('final bootstrap provenance', lambda: copy_small(provenance, 'kira-libffi-provenance.json'))
+          def remove_owned(path):
+              if path.is_symlink(): path.unlink()
+              elif path.is_dir(): shutil.rmtree(path)
+              elif path.exists(): path.unlink()
+              assert not path.exists() and not path.is_symlink()
+          for relative in ['.gradle', '.kotlin', 'build', 'source-contract/build', 'source-engine/build', 'source-testkit/build']:
+              path = repo / relative
+              def remove_output(path=path):
+                  assert not path.parent.is_symlink()
+                  remove_owned(path)
+              attempt('generated root ' + relative, remove_output)
+          for name in ['gradle', 'tmp']:
+              attempt('owned ' + name, lambda name=name: remove_owned(root / name))
+          # No failure of stop/copy/verification/upload authorizes retaining large build caches.
+          result = {'owner': owner, 'native_outcome': os.environ.get('NATIVE_OUTCOME'), 'cleanup_failures': failures,
+                    'bootstrap_root_absent': not bootstrap.exists() and not bootstrap.is_symlink()}
+          # Keep a bounded diagnostic tail; XML and both small provenance records remain complete.
+          for name in ['native.log', 'bootstrap.log', 'cleanup.log']:
+              path = evidence / name
+              if path.is_file() and path.stat().st_size > 4 * 1024 * 1024:
+                  with path.open('rb') as stream:
+                      stream.seek(-4 * 1024 * 1024, 2)
+                      tail = stream.read()
+                  path.write_bytes(b'[Only final 4 MiB retained]\n' + tail)
+          (evidence / 'cleanup-result.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          raise SystemExit(1 if failures or not result['bootstrap_root_absent'] else 0)
+          PY
+
+      - name: Preserve only small qualification diagnostics, never publication bytes
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: priority-source-native-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.runtime.outputs.root }}/diagnostics
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: false
+
+      - name: Always remove local evidence copy after the upload attempt
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 2
+        env:
+          OWNED_ROOT: ${{ steps.runtime.outputs.root }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, pathlib, shutil
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          root = pathlib.Path(os.environ['OWNED_ROOT'])
+          assert root == temp / ('kira-priority-native-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          owner = {key: os.environ[key] for key in ['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']}
+          assert not root.is_symlink() and json.loads((root / 'owner.json').read_text()) == owner
+          assert shutil.rmtree.avoids_symlink_attacks
+          shutil.rmtree(root)
+          provenance = temp / 'kira-libffi-provenance.json'
+          if provenance.exists():
+              assert not provenance.is_symlink()
+              receipt = json.loads(provenance.read_text())['owner']
+              assert receipt['repository'] == owner['GITHUB_REPOSITORY'] and receipt['run_id'] == owner['GITHUB_RUN_ID'] and receipt['run_attempt'] == owner['GITHUB_RUN_ATTEMPT']
+              provenance.unlink()
+          print('Owned local qualification evidence removed; no shared cache, package or source publication changed.')
+          PY
