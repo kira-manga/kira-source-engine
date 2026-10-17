@@ -34,7 +34,7 @@ def repository = input('KIRA_SOURCE_COHORT_REPOSITORY')
 def inventory = input('KIRA_SOURCE_COHORT_INVENTORY').toFile()
 def inventorySha = System.getenv('KIRA_SOURCE_COHORT_INVENTORY_SHA256')
 require(Files.isDirectory(repository, LinkOption.NOFOLLOW_LINKS), 'Owned repository absent')
-require(inventorySha ==~ /[0-9a-f]{64}/ && inventory.isFile() && inventory.length() in 1..(2 * 1024 * 1024) &&
+require(inventorySha ==~ /[0-9a-f]{64}/ && inventory.isFile() && inventory.length() >= 1L && inventory.length() <= 2L * 1024 * 1024 &&
     sha(inventory) == inventorySha, 'Original selected inventory required')
 def lines = inventory.readLines('UTF-8')
 require(lines.size() in 1..1024, 'Inventory entry bound')

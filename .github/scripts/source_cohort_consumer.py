@@ -24,9 +24,9 @@ import publisher_workflow as common
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
 SELECTION_SHA256 = "5d828cae9169355af1e1add1917c77802b3562054d0db2be7fe14a6675fc3d2b"
-APP_SHA = "0fc8ce820395f89d84770b802c73875deaf49f86"
+APP_SHA = "fe4b3200324179ecb0566f9e94e22a89c9d129ad"
 BACKEND_SHA = "97a7b72d02c1116f79702adc1c605d4cff093d15"
-APP_INIT_SHA = "095537c0d537e7f083f1c38f85cd92f56102f0085a5ddfabf1bcf39ebb100ad7"
+APP_INIT_SHA = "0f8acc7e5119de42917ca58d90a724e3e0a27cf4feb1f0119349c433a0f94d90"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
 RUNTIME_PREFIX = "me.manga.kira.sources.runtime."
@@ -245,6 +245,8 @@ def child_environment(job, label, env):
         result.update({key: env[key] for key in ("GRADLE_OPTS", "KONAN_DATA_DIR")})
     result.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(job.root / label / "home"), TMPDIR=str(job.root / label / "tmp"),
                   GRADLE_USER_HOME=str(job.root / label / "gradle"), CI="true", LANG="C.UTF-8" if job.phase == "linux" else "en_US.UTF-8")
+    if job.phase == "apple":
+        result["HOME"] = env["HOME"]  # CoreSimulator uses the actual runner user; caches/toolchain remain explicitly owned.
     result.update(KIRA_SOURCE_COHORT_REPOSITORY=str(job.root / "maven"), KIRA_SOURCE_COHORT_INVENTORY=str(job.root / "inventory.tsv"),
                   KIRA_SOURCE_COHORT_INVENTORY_SHA256=selection(policy.json_data(policy.read_small(job.root / "selection.json")))["producer"]["inventory_sha256"])
     return result
@@ -287,7 +289,7 @@ def fixture(job, env, action):
     finally:
         owned.write_json(log.with_suffix(".json"), {"action": action, "platform": mode, "elapsed_seconds": round(time.monotonic() - started, 3)})
         if action == "cleanup":
-            for name in ("owner.json", "ready.json", "stats.json", "cleanup.json"):
+            for name in ("owner.json", "ready.json", "simulator.json", "stats.json", "cleanup.json"):
                 path = root / name
                 if path.exists():
                     common.write_private(job.root / "diagnostics" / (log.stem + "-" + name), policy.read_small(path))

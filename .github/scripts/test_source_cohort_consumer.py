@@ -175,3 +175,22 @@ class SourceCohortConsumerTests(fixtures.OwnedFixture):
                 failures = ["app-workers", "fixture-cleanup", "native-blocked-by-app-workers"] if worker_fails else ["fixture-cleanup"]
                 self.assertEqual(json.loads((root / "diagnostics/finalize-result.json").read_text()), {"failures": failures})
                 self.assertFalse((root / "diagnostics/cleanup-ready.json").exists())
+
+    def test_native_user_home_keeps_owned_caches_and_excludes_ambient_credentials(self):
+        workflow = Path(__file__).parents[1] / "workflows/source-cohort-consumer-check.yml"
+        selected = json.loads(next(line.strip() for line in workflow.read_text().splitlines() if line.startswith('    {"')))
+        caller.owned.write_json(self.root / "selection.json", selected)
+        env = {"HOME": "/Users/runner", "JAVA_HOME": "/tool/java", "KONAN_DATA_DIR": str(self.root / "konan"),
+               "GRADLE_OPTS": "-Dkonan.data.dir=" + str(self.root / "konan"),
+               "GITHUB_TOKEN": "synthetic-not-a-credential", "JAVA_TOOL_OPTIONS": "synthetic-ambient-override"}
+        for phase in ("apple", "linux"):
+            with self.subTest(phase=phase):
+                job = caller.common.Runtime(self.root / "control", self.root / "app-source", self.root, {}, phase)
+                child = caller.child_environment(job, "app", env)
+                self.assertEqual(child["HOME"], env["HOME"] if phase == "apple" else str(self.root / "app/home"))
+                self.assertEqual(child["GRADLE_USER_HOME"], str(self.root / "app/gradle"))
+                self.assertEqual(child["TMPDIR"], str(self.root / "app/tmp"))
+                self.assertNotIn("GITHUB_TOKEN", child)
+                self.assertNotIn("JAVA_TOOL_OPTIONS", child)
+                if phase == "apple":
+                    self.assertEqual(child["KONAN_DATA_DIR"], env["KONAN_DATA_DIR"])
