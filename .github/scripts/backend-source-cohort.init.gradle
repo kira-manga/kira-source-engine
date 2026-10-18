@@ -9,7 +9,7 @@ import org.gradle.api.tasks.testing.Test
 // Check-only JVM consumer. The Engine orchestrator admits the original inventory
 // and actual owned-Maven bytes. Never substitute versions, dependencies or locks.
 def group = 'me.manga.kira.source'
-def version = '0.2.0'
+def version = '0.2.1'
 def require = { condition, message ->
     if (!condition) throw new GradleException('Source cohort refused: ' + message)
 }
@@ -148,7 +148,7 @@ gradle.projectsEvaluated {
     def project = gradle.rootProject
     def declared = project.configurations.getByName('implementation').dependencies.findAll { it.group == group }
     require(declared.size() == 1 && declared[0].name == 'source-engine' && declared[0].version == version,
-        'Actual Backend must declare source-engine:0.2.0 without testkit')
+        'Actual Backend must declare source-engine:0.2.1 without testkit')
     def compile = project.tasks.getByName('compileKotlin')
     compile.doFirst { witness(compile, project.configurations.getByName('compileClasspath'), compile.libraries.files) }
     def test = project.tasks.getByName('test')
