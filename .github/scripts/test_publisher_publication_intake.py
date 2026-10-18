@@ -426,7 +426,10 @@ class PublisherWriterBoundaryTests(fixtures.OwnedFixture):
         absent.assert_called_once_with(self.metadata["inventory.tsv"], fixtures.RELEASE,
                                        username="reader", token="synthetic_package_read")
         window.assert_called_once_with(self.selection, api_token="synthetic_api_read", package_token="synthetic_package_read",
-                                       before=request["record"]["window"], completed=[], progress=None)
+                                       deleted_observer=mock.ANY, before=request["record"]["window"], completed=[], progress=None)
+        with mock.patch.object(publisher, "controller_deleted_versions", return_value={"synthetic": "not-authority"}) as audit:
+            self.assertEqual(window.call_args.kwargs["deleted_observer"](), {"synthetic": "not-authority"})
+            audit.assert_called_once_with(self.archive_path, self.selection)
         self.assertNotIn("synthetic_package_read", json.dumps(result))
         self.assertNotIn("synthetic_api_read", repr(self.lineage.call_args))
         self.assertEqual(len(self.requests), 14)
@@ -480,6 +483,7 @@ class NativeAttachmentSourceTests(unittest.TestCase):
     def test_cli_refuses_ambient_write_custody_and_secret_arguments_without_echo_or_work(self):
         for arguments, environment in [(["synthetic_SECRET_argument"], {}),
                                        ([], {"KIRA_MAVEN_WRITE_TOKEN": "synthetic_SECRET_write"}),
+                                       ([], {"KIRA_PACKAGES_METADATA_AUDIT_TOKEN": "synthetic_SECRET_audit"}),
                                        ([], {"GITHUB_TOKEN": "synthetic_SECRET_ambient"})]:
             with self.subTest(environment=list(environment)):
                 error = io.StringIO()
@@ -554,20 +558,22 @@ class ReleaseWindowTests(unittest.TestCase):
     def reset(self, values=None):
         self.assertClosed()
         values = window_values(self.selection) if values is None else values
-        self.responses = [http_fixtures.Response(value, headers={"X-OAuth-Scopes": "read:packages"}) for value in values]
+        self.responses = [http_fixtures.Response(value) for value in values[:9]] + registry_fixtures.registry_responses(values[9:])
         self.connections.clear()
         self.requests.clear()
 
     def observe(self, **kwargs):
+        observer = lambda: publisher.remote.observe_deleted_versions(self.selection["release_window"]["packages"],
+                            self.selection["publisher"]["repository_id"], token="synthetic_METADATA_AUDIT")
         return publisher.observe_release_window(self.selection, api_token="synthetic_API_READ",
-                                                 package_token="synthetic_PACKAGE_READ", **kwargs)
+                                                 package_token="synthetic_PACKAGE_READ", deleted_observer=observer, **kwargs)
 
     def test_live_repo_and_complete_registry_recheck_uses_distinct_read_channels(self):
         before = self.observe()
         self.assertEqual(len(self.requests), 40)
         self.assertEqual(before["control"]["active_run_id"], self.selection["publisher"]["run_id"])
         for number, (_, request) in enumerate(self.requests):
-            token = "synthetic_API_READ" if number < 9 else "synthetic_PACKAGE_READ"
+            token = "synthetic_API_READ" if number < 9 else ("synthetic_PACKAGE_READ" if number < 25 else "synthetic_METADATA_AUDIT")
             self.assertEqual(request["headers"]["Authorization"], "Bearer " + token)
         self.assertNotIn("synthetic_API_READ", json.dumps(before))
         self.assertNotIn("synthetic_PACKAGE_READ", json.dumps(before))

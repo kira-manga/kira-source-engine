@@ -42,6 +42,13 @@ def registry_values(bindings, completed=(), version=fixtures.RELEASE):
     return values
 
 
+def registry_responses(values):
+    ordered = [values[0], *values[1::2], *values[2::2]]
+    return [http_fixtures.Response(value, headers={"X-OAuth-Scopes":
+            "read:packages" if number < 16 else "delete:packages,read:packages"})
+            for number, value in enumerate(ordered)]
+
+
 class Response(io.BytesIO):
     def __init__(self, data, headers, status, on_read):
         super().__init__(data)
@@ -485,21 +492,30 @@ class RemoteRegistryTests(unittest.TestCase):
     def reset(self, values=None):
         self.assertClosed()
         values = registry_values(self.bindings) if values is None else values
-        self.responses = [http_fixtures.Response(value, headers={"X-OAuth-Scopes": "read:packages"}) for value in values]
+        self.responses = registry_responses(values)
         self.connections.clear()
         self.requests.clear()
 
     def observe(self, **kwargs):
-        return remote.observe_registry(self.bindings, 73, fixtures.RELEASE, token="synthetic_PACKAGE_READ", **kwargs)
+        observer = lambda: remote.observe_deleted_versions(self.bindings, 73, token="synthetic_METADATA_AUDIT")
+        return remote.observe_registry(self.bindings, 73, fixtures.RELEASE, token="synthetic_PACKAGE_READ",
+                                        deleted_observer=observer, **kwargs)
 
     def test_all_fifteen_repository_associations_and_active_deleted_pages_are_observed(self):
         before = self.observe()
         self.assertEqual(set(before["packages"]), set(self.bindings))
         self.assertEqual(len(self.requests), 31)
         self.assertEqual(before["oauth_scopes"], ["read:packages"])
+        self.assertEqual(before["deleted_audit"], {"profile": remote.AUDIT_PROFILE,
+                                                 "oauth_scopes": ["delete:packages", "read:packages"]})
         self.assertTrue(all(args[0] == "GET" and args[1].startswith("/orgs/kira-manga/packages") for args, _ in self.requests))
         self.assertEqual(sum("state=deleted" in args[1] for args, _ in self.requests), 15)
+        for number, (args, options) in enumerate(self.requests):
+            token = "synthetic_PACKAGE_READ" if number < 16 else "synthetic_METADATA_AUDIT"
+            self.assertEqual(options["headers"]["Authorization"], "Bearer " + token)
+            self.assertEqual("state=deleted" in args[1], number >= 16)
         self.assertNotIn("synthetic_PACKAGE_READ", json.dumps(before))
+        self.assertNotIn("synthetic_METADATA_AUDIT", json.dumps(before))
         self.reset()
         self.assertEqual(self.observe(before=before), before)
 
@@ -545,6 +561,30 @@ class RemoteRegistryTests(unittest.TestCase):
             self.reset(values)
             with self.subTest(field=field), self.assertRaises(policy.Refusal):
                 self.observe(before=before, completed=[first, second], progress=progress)
+
+    def test_missing_audit_never_falls_back_and_separate_grants_are_bound_across_observations(self):
+        with self.assertRaises(policy.Refusal):
+            remote.observe_registry(self.bindings, 73, fixtures.RELEASE, token="synthetic_PACKAGE_READ")
+        self.assertEqual(self.requests, [])
+        before = self.observe()
+        for number in (16, 30):
+            self.reset()
+            self.responses[number].headers["X-OAuth-Scopes"] = "read:packages,delete:packages,repo"
+            with self.subTest(changed_response=number), self.assertRaises(policy.Refusal):
+                self.observe(before=before)
+        self.reset()
+        for response in self.responses[16:]:
+            response.headers["X-OAuth-Scopes"] = "read:packages,delete:packages,repo"
+        with self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.reset()
+        bad = {"packages": {identity: value | {"deleted": []} for identity, value in self.bindings.items()},
+               "grants": {"profile": remote.AUDIT_PROFILE, "oauth_scopes": ["delete:packages", "read:packages"]}}
+        bad["packages"].pop(next(iter(self.bindings)))
+        with self.assertRaises(policy.Refusal):
+            remote.observe_registry(self.bindings, 73, fixtures.RELEASE, token="synthetic_PACKAGE_READ",
+                                      deleted_observer=lambda: bad)
+        self.assertEqual(len(self.requests), 16)
 
 
 if __name__ == "__main__":

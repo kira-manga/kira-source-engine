@@ -12,6 +12,7 @@ import re
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -34,6 +35,8 @@ TRUSTED_POLICY = {
 }
 CONTEXT_KEYS = ("GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_EVENT_NAME", "GITHUB_REF",
                 "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+NATIVE_CREDENTIAL_KEYS = {"KIRA_PUBLICATION_API_READ_TOKEN", "KIRA_MAVEN_READ_USERNAME", "KIRA_MAVEN_READ_TOKEN",
+                          "KIRA_MAVEN_WRITE_USERNAME", "KIRA_MAVEN_WRITE_TOKEN"}
 
 
 class MissingAuthority(policy.Refusal):
@@ -181,12 +184,14 @@ def inputs(runtime, selected, *, token):
     return archive, asset, proof
 
 
-def preflight(runtime, selection_sha256, *, token, package_token=None):
+def preflight(runtime, selection_sha256, *, token, package_token=None, audit_token=None):
     policy.require(runtime.phase == "preflight", "Wrong workflow phase")
+    audit_credentials(audit_token, api_token=token, package_token=package_token)
     selected = runtime.selection(selection_sha256, token=token)
     archive, asset, proof = inputs(runtime, selected, token=token)
     result = intake.publisher_preflight(runtime.producer, selected, archive, asset, proof, token=token)
-    window = intake.observe_release_window(selected, api_token=token, package_token=package_token)
+    window = intake.observe_release_window(selected, api_token=token, package_token=package_token,
+                                            deleted_observer=lambda: audit_deleted(selected, audit_token))
     data = encoded({"selection": selected, "preflight": result, "window": window})
     write_private(runtime.root / "comparison.json", data)
     policy.source_snapshot(runtime.control, runtime.context["GITHUB_WORKFLOW_SHA"], fresh=True)
@@ -287,9 +292,77 @@ def native_credentials(*, api_token, package_token, write_username, write_token)
             "KIRA_MAVEN_WRITE_TOKEN": write_token}
 
 
-def redacted_line(data, credentials):
+def audit_credentials(audit_token, *, api_token, package_token, write_token=None):
+    receipts._validate_read_token(audit_token)
+    policy.require(audit_token is not None and api_token is not None and package_token is not None
+                   and audit_token not in (api_token, package_token, write_token), "Separate explicit metadata-audit custody required")
+
+
+def audit_deleted(selected, audit_token):
+    window = intake.validate_release_window(selected)
+    result = intake.remote.observe_deleted_versions(window["packages"], selected["publisher"]["repository_id"], token=audit_token)
+    intake._window_open(window)
+    return result
+
+
+class MetadataAudit:
+    """One owned socket serviced by the existing controller selector; no worker/daemon."""
+    def __init__(self, runtime, selected, token, deadline):
+        self.runtime, self.selected, self.token, self.deadline = runtime, selected, token, deadline
+        self.path = intake.metadata_audit_socket(runtime.root / policy.ARCHIVE, selected)
+        self.binding = intake.metadata_audit_binding(selected)
+        self.listener, self.identity, self.calls = None, None, 0
+
+    def __enter__(self):
+        self.runtime.check()
+        policy.require(not self.path.exists() and not self.path.is_symlink(), "Metadata-audit socket reuse refused")
+        try:
+            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.listener.bind(str(self.path))
+            self.identity = self.path.lstat()
+            self.path.chmod(0o600)
+            self.listener.listen(1)
+            self.listener.settimeout(5)
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def serve_once(self):
+        policy.require(self.calls < 16 and time.monotonic() < self.deadline, "Metadata-audit call/time bound exceeded")
+        self.runtime.check()
+        self.calls += 1
+        with self.listener.accept()[0] as connection:
+            connection.settimeout(5)
+            request = intake.audit_receive(connection, intake.AUDIT_REQUEST_LIMIT, 5)
+            policy.require(type(request) is dict and set(request) == set(self.binding) | {"nonce"}
+                           and all(request[key] == value for key, value in self.binding.items())
+                           and type(request["nonce"]) is str and re.fullmatch(r"[0-9a-f]{32}", request["nonce"]) is not None,
+                           "Metadata-audit request binding refused")
+            observation = audit_deleted(self.selected, self.token)
+            policy.require(time.monotonic() < self.deadline, "Metadata-audit time bound exceeded")
+            data = encoded(request | {"observation": observation})
+            policy.require(len(data) <= intake.AUDIT_RESPONSE_LIMIT, "Metadata-audit response bound exceeded")
+            connection.sendall(data)
+
+    def __exit__(self, *_):
+        try:
+            if self.listener is not None:
+                self.listener.close()
+            if self.identity is not None:
+                current = self.path.lstat()
+                policy.require(stat.S_ISSOCK(current.st_mode) and current.st_uid == os.getuid()
+                               and (current.st_dev, current.st_ino) == (self.identity.st_dev, self.identity.st_ino),
+                               "Metadata-audit cleanup owner changed")
+                self.path.unlink()
+        finally:
+            self.token = None  # No claim of secure erasure of immutable Python strings.
+
+
+def redacted_line(data, credentials, audit_token):
     secrets = [credentials[key].encode("ascii") for key in
                ("KIRA_PUBLICATION_API_READ_TOKEN", "KIRA_MAVEN_READ_TOKEN", "KIRA_MAVEN_WRITE_TOKEN")]
+    secrets.append(audit_token.encode("ascii"))
     for role in ("READ", "WRITE"):
         pair = credentials["KIRA_MAVEN_" + role + "_USERNAME"] + ":" + credentials["KIRA_MAVEN_" + role + "_TOKEN"]
         secrets.append(base64.b64encode(pair.encode("ascii")))
@@ -298,13 +371,18 @@ def redacted_line(data, credentials):
     return re.sub(rb"https://[^\s]*\?[^\s]*", b"[redacted-query-url]", data)
 
 
-def native_output(process, log, credentials, deadline):
+def native_output(process, log, credentials, deadline, audit):
     pending, total = b"", 0
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
-        while selector.get_map():
+        selector.register(audit.listener, selectors.EVENT_READ)
+        reading = True
+        while reading:
             policy.require(time.monotonic() < deadline, "Native publication time bound exceeded")
             for key, _ in selector.select(timeout=0.5):
+                if key.fileobj is audit.listener:
+                    audit.serve_once()
+                    continue
                 chunk = os.read(key.fd, 65536)
                 total += len(chunk)
                 policy.require(total <= 64 * 1024 * 1024, "Native output bound exceeded")
@@ -313,12 +391,13 @@ def native_output(process, log, credentials, deadline):
                 pending = lines.pop()
                 if not chunk:
                     selector.unregister(process.stdout)
+                    reading = False
                     lines.append(pending)
                     pending = b""
                 policy.require(len(pending) <= 1024 * 1024, "Native output line bound exceeded")
                 for line in lines:
                     policy.require(len(line) <= 1024 * 1024, "Native output line bound exceeded")
-                    safe = redacted_line(line, credentials) + b"\n"
+                    safe = redacted_line(line, credentials, audit.token) + b"\n"
                     policy.require(log.tell() + len(safe) <= 64 * 1024 * 1024, "Native diagnostic bound exceeded")
                     log.write(safe)
     while process.poll() is None:
@@ -327,18 +406,24 @@ def native_output(process, log, credentials, deadline):
     return total
 
 
-def run_native(runtime, env, command, credentials):
+def run_native(runtime, env, command, credentials, *, selected, audit_token):
+    policy.require(set(credentials) == NATIVE_CREDENTIAL_KEYS and "KIRA_PACKAGES_METADATA_AUDIT_TOKEN" not in env,
+                   "Native credential projection refused")
+    audit_credentials(audit_token, api_token=credentials["KIRA_PUBLICATION_API_READ_TOKEN"],
+                      package_token=credentials["KIRA_MAVEN_READ_TOKEN"], write_token=credentials["KIRA_MAVEN_WRITE_TOKEN"])
     write_private(runtime.root / "diagnostics/native-command.json", encoded(command))
     process, started = None, time.monotonic()
     try:
         path = runtime.root / "diagnostics/native.log"
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log, \
+                MetadataAudit(runtime, selected, audit_token, started + 1200) as audit:
             child = owned_helpers().child_environment(runtime, env) | runtime.context
             child.update({key: env[key] for key in ("GITHUB_ACTIONS", "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP")})
             process = subprocess.Popen(command, cwd=runtime.producer, env=child | credentials, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-            count = native_output(process, log, credentials, started + 1200)
+            count = native_output(process, log, credentials, started + 1200, audit)
             policy.require(process.returncode == 0, "Native publication failed; partial remote state may exist")
+            policy.require(audit.calls == 16, "Complete native metadata-audit sequence required")
         return {"exit_code": 0, "seconds": round(time.monotonic() - started, 3), "output_bytes": count}
     finally:
         try:
@@ -402,9 +487,10 @@ def capture_readback(runtime, selected, record_sha256):
     write_private(runtime.root / "diagnostics/remote-readback.json", data)
 
 
-def recheck(runtime, selection_sha256, record_sha256, *, token, package_token=None, env=None,
+def recheck(runtime, selection_sha256, record_sha256, *, token, package_token=None, audit_token=None, env=None,
             write_username=None, write_token=None):
     policy.require(runtime.phase == "recheck", "Wrong workflow phase")
+    audit_credentials(audit_token, api_token=token, package_token=package_token, write_token=write_token)
     selected = runtime.selection(selection_sha256, token=token)
     record = downloaded(runtime, "handoff", "comparison.json", policy.MAX_META)
     data = policy.read_small(private_file(record))
@@ -414,7 +500,9 @@ def recheck(runtime, selection_sha256, record_sha256, *, token, package_token=No
                    "Cross-invocation or substituted preflight refused")
     archive, asset, proof = inputs(runtime, selected, token=token)
     intake.publisher_recheck(runtime.producer, selected, before["preflight"], archive, asset, proof, token=token)
-    intake.observe_release_window(selected, api_token=token, package_token=package_token, before=before["window"])
+    deleted_observer = lambda: audit_deleted(selected, audit_token)
+    intake.observe_release_window(selected, api_token=token, package_token=package_token,
+                                  deleted_observer=deleted_observer, before=before["window"])
     credentials = native_credentials(api_token=token, package_token=package_token,
                                      write_username=write_username, write_token=write_token)
     diagnostics = runtime.root / "diagnostics"
@@ -424,13 +512,14 @@ def recheck(runtime, selection_sha256, record_sha256, *, token, package_token=No
     source_before = policy.source_snapshot(runtime.producer, selected["producer"]["source_sha"], fresh=True)
     write_private(diagnostics / "source-before.json", encoded(source_before))
     env = tooling(runtime, selected, runtime_environment(runtime, env or {}))
-    intake.observe_release_window(selected, api_token=token, package_token=package_token, before=before["window"])
+    intake.observe_release_window(selected, api_token=token, package_token=package_token,
+                                  deleted_observer=deleted_observer, before=before["window"])
     metadata = stage_raw(runtime, selected, archive)
     for name, value in metadata.items():
         write_private(diagnostics / name, value)
     command = guarded_command(runtime, selected, metadata, record_sha256)
     policy.source_snapshot(runtime.control, runtime.context["GITHUB_WORKFLOW_SHA"], fresh=True)
-    native = run_native(runtime, env, command, credentials)
+    native = run_native(runtime, env, command, credentials, selected=selected, audit_token=audit_token)
     owned_helpers().profile(runtime, env)
     source_after = policy.source_snapshot(runtime.producer, selected["producer"]["source_sha"], fresh=False)
     policy.require(source_after == source_before
@@ -505,6 +594,8 @@ def main(argv=None):
         policy.require(command == "recheck" or (write_username is None and write_token is None), "Write custody forbidden in this phase")
         token = env.pop("KIRA_PUBLICATION_API_READ_TOKEN", None)
         package_token = env.pop("KIRA_PACKAGES_READ_TOKEN", None)
+        audit_token = env.pop("KIRA_PACKAGES_METADATA_AUDIT_TOKEN", None)
+        policy.require(command in ("preflight", "recheck") or audit_token is None, "Audit custody forbidden in this phase")
         context = {name: env.get(name, "") for name in CONTEXT_KEYS}
         policy.require(context["GITHUB_RUN_ID"].isascii() and context["GITHUB_RUN_ID"].isdigit()
                        and 0 < int(context["GITHUB_RUN_ID"]) <= 2**63 - 1 and context["GITHUB_RUN_ATTEMPT"] == "1",
@@ -542,10 +633,11 @@ def main(argv=None):
             result = prepare(runtime, policy.json_data(env.get("KIRA_PUBLISHER_REQUEST", "").encode("utf-8")), token=token,
                              output=Path(env["GITHUB_OUTPUT"]))
         elif command == "preflight":
-            result = preflight(runtime, env.get("KIRA_SELECTION_SHA256", ""), token=token, package_token=package_token)
+            result = preflight(runtime, env.get("KIRA_SELECTION_SHA256", ""), token=token,
+                               package_token=package_token, audit_token=audit_token)
         else:
             result = recheck(runtime, env.get("KIRA_SELECTION_SHA256", ""), env.get("KIRA_RECORD_SHA256", ""),
-                             token=token, package_token=package_token, env=env,
+                             token=token, package_token=package_token, audit_token=audit_token, env=env,
                              write_username=write_username, write_token=write_token)
         with Path(env["GITHUB_OUTPUT"]).open("a") as output:
             for key, value in result.items():

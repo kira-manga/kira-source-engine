@@ -24,6 +24,7 @@ COHORT_SECONDS = 300
 INDEX_LIMIT = 4 * 1024 * 1024
 LOCATION_LIMIT = 8192
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
+AUDIT_PROFILE = "classic-read-delete-packages"
 
 
 def read_credentials(username, token):
@@ -194,8 +195,46 @@ def _versions(values):
     return sorted(result, key=lambda item: (item["name"], item["id"]))
 
 
+def _audit_grants(value):
+    policy.require(type(value) is dict and set(value) == {"profile", "oauth_scopes"}
+                   and value["profile"] == AUDIT_PROFILE and type(value["oauth_scopes"]) is list
+                   and all(type(item) is str for item in value["oauth_scopes"])
+                   and receipts._metadata_audit_scopes(",".join(value["oauth_scopes"])) == value["oauth_scopes"],
+                   "Separate metadata-audit grants refused")
+    return {"profile": AUDIT_PROFILE, "oauth_scopes": value["oauth_scopes"].copy()}
+
+
+def _deleted_observation(value, bindings):
+    policy.require(type(value) is dict and set(value) == {"packages", "grants"}
+                   and type(value["packages"]) is dict and set(value["packages"]) == set(bindings),
+                   "Complete selected deleted-version observation required")
+    result = {}
+    for identity, binding in bindings.items():
+        item = value["packages"][identity]
+        policy.require(type(item) is dict and set(item) == set(binding) | {"deleted"}
+                       and type(item["id"]) is int and type(item["repository_id"]) is int
+                       and {key: item[key] for key in binding} == binding, "Deleted-version package binding changed")
+        result[identity] = binding | {"deleted": _versions(item["deleted"])}
+    return {"packages": result, "grants": _audit_grants(value["grants"])}
+
+
+def observe_deleted_versions(packages, repository_id, *, token):
+    """Controller-only credential; one complete fixed cohort, no active/payload reads."""
+    bindings = package_bindings(packages, repository_id)
+    deadline, scopes, found = time.monotonic() + COHORT_SECONDS, None, {}
+    for identity, binding in bindings.items():
+        policy.require(time.monotonic() < deadline, "Metadata-audit time bound exceeded")
+        page = receipts._get_deleted_versions(binding["name"], token)
+        policy.require(time.monotonic() < deadline, "Metadata-audit time bound exceeded")
+        if scopes is None:
+            scopes = page["oauth_scopes"]
+        policy.require(page["oauth_scopes"] == scopes, "Metadata-audit grants changed")
+        found[identity] = binding | {"deleted": _versions(page["items"])}
+    return _deleted_observation({"packages": found, "grants": {"profile": AUDIT_PROFILE, "oauth_scopes": scopes}}, bindings)
+
+
 def _registry(value, bindings):
-    policy.require(type(value) is dict and set(value) == {"packages", "oauth_scopes"}
+    policy.require(type(value) is dict and set(value) == {"packages", "oauth_scopes", "deleted_audit"}
                    and type(value["packages"]) is dict and set(value["packages"]) == set(bindings),
                    "Registry observation fields refused")
     scopes = value["oauth_scopes"]
@@ -211,14 +250,16 @@ def _registry(value, bindings):
         policy.require(not ({item["id"] for item in active} & {item["id"] for item in deleted}),
                        "Ambiguous package version state refused")
         result[identity] = binding | {"active": active, "deleted": deleted}
-    return {"packages": result, "oauth_scopes": scopes.copy()}
+    return {"packages": result, "oauth_scopes": scopes.copy(), "deleted_audit": _audit_grants(value["deleted_audit"])}
 
 
-def observe_registry(packages, repository_id, version, *, token, before=None, completed=(), progress=None):
+def observe_registry(packages, repository_id, version, *, token, deleted_observer=None,
+                     before=None, completed=(), progress=None):
     """Complete authenticated active/deleted version observations, not an isolated index guess."""
     try:
         policy.canonical(version)
         bindings = package_bindings(packages, repository_id)
+        policy.require(callable(deleted_observer), "Separate controller metadata audit required")
         policy.require(type(completed) in (list, tuple) and all(type(item) is str for item in completed)
                        and list(completed) == sorted(set(completed)) and set(completed) <= set(bindings),
                        "Registry completed subset refused")
@@ -246,11 +287,13 @@ def observe_registry(packages, repository_id, version, *, token, before=None, co
         policy.require(set(found) == set(bindings), "Incomplete or foreign package cohort refused")
         for identity, item in sorted(found.items()):
             path = "/orgs/kira-manga/packages/maven/" + quote(item["name"], safe="") + "/versions"
-            for state in ("active", "deleted"):
-                page = receipts._get_collection(path + "?state=" + state + "&per_page=100&page=1", token, package_read=True)
-                policy.require(page["oauth_scopes"] == scopes, "Package read grants changed")
-                item[state] = _versions(page["items"])
-        observed = _registry({"packages": found, "oauth_scopes": scopes}, bindings)
+            page = receipts._get_collection(path + "?state=active&per_page=100&page=1", token, package_read=True)
+            policy.require(page["oauth_scopes"] == scopes, "Package read grants changed")
+            item["active"] = _versions(page["items"])
+        deleted = _deleted_observation(deleted_observer(), bindings)
+        for identity, item in found.items():
+            item["deleted"] = deleted["packages"][identity]["deleted"]
+        observed = _registry({"packages": found, "oauth_scopes": scopes, "deleted_audit": deleted["grants"]}, bindings)
         if before is None:
             policy.require(not completed and progress is None, "Registry baseline cannot be reconstructed")
             for item in observed["packages"].values():
@@ -259,8 +302,9 @@ def observe_registry(packages, repository_id, version, *, token, before=None, co
             return observed
         previous = _registry(before, bindings)
         prior_progress = _registry(progress, bindings) if progress is not None else None
-        policy.require(observed["oauth_scopes"] == previous["oauth_scopes"], "Package read grants changed")
-        policy.require(prior_progress is None or prior_progress["oauth_scopes"] == previous["oauth_scopes"],
+        policy.require(all(observed[key] == previous[key] for key in ("oauth_scopes", "deleted_audit")),
+                       "Package read/audit grants changed")
+        policy.require(prior_progress is None or all(prior_progress[key] == previous[key] for key in ("oauth_scopes", "deleted_audit")),
                        "Registry progress grants changed")
         for identity, current in observed["packages"].items():
             initial = previous["packages"][identity]

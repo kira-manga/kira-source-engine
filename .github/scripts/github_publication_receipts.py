@@ -16,6 +16,12 @@ DEPRECATION_LINK = '<https://docs.github.com/en/rest/about-the-rest-api/api-vers
 SOCKET_TIMEOUT = 15
 READ_SECONDS = 30
 PUBLISHER_WORKFLOW = ".github/workflows/publish.yml"
+DELETED_PACKAGE_PATHS = {
+    policy.GROUP + "." + module + suffix:
+    "/orgs/kira-manga/packages/maven/" + quote(policy.GROUP + "." + module + suffix, safe="")
+    + "/versions?state=deleted&per_page=100&page=1"
+    for module in policy.MODULES for suffix in policy.PUBLICATIONS.values()
+}
 BYPASS_QUERY = (
     'query BranchBypass($qualifiedName: String!) { '
     'repository(owner:"kira-manga", name:"kira-source-engine") { databaseId nameWithOwner '
@@ -24,10 +30,13 @@ BYPASS_QUERY = (
 )
 
 
-def _request_json(path, token, *, bypass_branch=None, collection=False, package_read=False, observation=None):
+def _request_json(path, token, *, bypass_branch=None, collection=False, package_read=False,
+                  metadata_audit=False, observation=None):
     """Fixed-host GET or fixed bypass query; DNS has no separately enforced hard deadline."""
-    policy.require(type(collection) is bool and type(package_read) is bool
-                   and (not (collection or package_read) or bypass_branch is None),
+    policy.require(type(collection) is bool and type(package_read) is bool and type(metadata_audit) is bool
+                   and not (package_read and metadata_audit)
+                   and (not (collection or package_read or metadata_audit) or bypass_branch is None)
+                   and (not metadata_audit or (collection and token is not None and path in DELETED_PACKAGE_PATHS.values())),
                    "Receipt response mode refused")
     body = None
     if bypass_branch is not None:
@@ -66,6 +75,8 @@ def _request_json(path, token, *, bypass_branch=None, collection=False, package_
         link = response.getheader("Link")
         policy.require(not link or link == DEPRECATION_LINK, "Paginated receipt refused")
         scopes = _package_read_scopes(response.getheader("X-OAuth-Scopes")) if package_read else None
+        if metadata_audit:
+            scopes = _metadata_audit_scopes(response.getheader("X-OAuth-Scopes"))
         if observation is not None:
             observation["oauth_scopes"] = scopes
         length = response.getheader("Content-Length")
@@ -117,6 +128,31 @@ def _get_collection(path, token, *, package_read=False):
     _validate_read_token(token)
     policy.require(token is not None, "Explicit collection read token required")
     return _request_json(path, token, collection=True, package_read=package_read)
+
+
+def _metadata_audit_scopes(value):
+    """Separate classic deletion-capable custody, never the payload-reader profile."""
+    policy.require(type(value) is str and 0 < len(value) <= 2048, "Classic metadata-audit scope metadata required")
+    scopes = [item.strip() for item in value.split(",")]
+    policy.require(1 <= len(scopes) <= 64 and len(scopes) == len(set(scopes))
+                   and all(re.fullmatch(r"[a-z][a-z0-9:_-]{0,80}", item) is not None for item in scopes)
+                   and {"read:packages", "delete:packages"} <= set(scopes) and "write:packages" not in scopes,
+                   "Metadata-audit token grants refused")
+    return sorted(scopes)
+
+
+def _get_deleted_versions(package_name, token):
+    """The separate audit credential has exactly fifteen possible GET targets."""
+    metadata = {"status": None, "stage": "token_validation"}
+    try:
+        _validate_read_token(token)
+        policy.require(token is not None and type(package_name) is str and package_name in DELETED_PACKAGE_PATHS,
+                       "Explicit fixed metadata-audit target required")
+        metadata["stage"] = "request"
+        return _request_json(DELETED_PACKAGE_PATHS[package_name], token, collection=True,
+                             metadata_audit=True, observation=metadata)
+    except Exception:
+        raise ReceiptObservationRefusal(metadata["status"], metadata["stage"]) from None
 
 
 class ReceiptObservationRefusal(policy.Refusal):
