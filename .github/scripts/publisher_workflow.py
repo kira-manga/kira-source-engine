@@ -465,6 +465,33 @@ def cleanup(runtime):
     shutil.rmtree(runtime.root)
 
 
+def refusal_sites(error):
+    """Bounded trusted code locations only, including deliberately suppressed causes.
+
+    Never render exceptions, frames/locals, source lines, external filenames or HTTP
+    bodies. This diagnoses a refusal; it neither changes nor retries any release gate.
+    """
+    directory = os.path.dirname(os.path.abspath(__file__))
+    allowed = {os.path.join(directory, name): name for name in (
+        "publisher_workflow.py", "publisher_publication_intake.py", "connected_publication_intake.py",
+        "github_publication_receipts.py", "publication_policy.py", "remote_maven_readback.py")}
+    sites, seen = [], set()
+    for _ in range(8):
+        if error is None or id(error) in seen:
+            break
+        seen.add(id(error))
+        trace = error.__traceback__
+        for _ in range(64):
+            if trace is None:
+                break
+            name = allowed.get(os.path.abspath(trace.tb_frame.f_code.co_filename))
+            if name is not None:
+                sites.append(name + ":" + str(trace.tb_lineno))
+            trace = trace.tb_next
+        error = error.__cause__ if error.__cause__ is not None else error.__context__
+    return " > ".join(sites[-32:]) or "unavailable"
+
+
 def main(argv=None):
     previous_signal = None
     try:
@@ -530,8 +557,9 @@ def main(argv=None):
     except MissingAuthority:
         print("KIRA_PUBLISHER_HELD: selected policy or writer authority unavailable.", file=sys.stderr)
         return 3
-    except Exception:
+    except Exception as error:
         print("Publisher workflow refused. If native execution began, remote state may be partial; do not retry.", file=sys.stderr)
+        print("Publisher refusal code sites: " + refusal_sites(error), file=sys.stderr)
         return 1
     finally:
         if previous_signal is not None:
