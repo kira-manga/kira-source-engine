@@ -3,22 +3,27 @@
 These tests are not genuine GitHub approval, Darwin execution or publication evidence.
 """
 
+import ast
 import base64
 import copy
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import tarfile
+import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import urllib.parse
 
 import github_publication_receipts as receipts
 import publication_policy as policy
 import publisher_workflow as workflow
+import remote_maven_readback as reader
 import test_github_publication_receipts as http_fixtures
 import test_publication_policy as fixtures
 import test_publisher_publication_intake as intake_fixtures
@@ -467,7 +472,12 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertEqual(probe.count("secrets."), 2)
         self.assertIn("KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}", probe)
         self.assertIn("KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}", probe)
-        self.assertNotIn("github.token", probe)
+        self.assertEqual(probe.count("github.token"), 1)
+        self.assertIn("KIRA_DIAGNOSTIC_JOB_READ_TOKEN: ${{ github.token }}", probe)
+        self.assertLess(probe.index("os.environ.pop('KIRA_DIAGNOSTIC_JOB_READ_TOKEN')"),
+                        probe.index("import github_publication_receipts"))
+        self.assertIn("timeout-minutes: 5", probe)
+        self.assertNotIn("error_class", probe)
         self.assertNotIn("GH_TOKEN:", probe)
         self.assertNotIn("outputs:", probe)
         self.assertEqual(probe.count("uses:"), 1)
@@ -522,6 +532,85 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         for pin in ("34e114876b0b11c390a56381ad16ebd13914f8d5", "d3f86a106a0bac45b974a628896c90dbdf5c8093",
                     "ea165f8d65b6e75b540449e92b4886f43607fa02", "c1e323688fd81a25caa38c78aa6df2d33d3e20d9"):
             self.assertIn(pin, source)
+
+
+class PackageVersionDiagnosticTests(unittest.TestCase):
+    def test_inline_version_loop_is_bounded_and_only_classic_failures_are_required(self):
+        source = (Path(__file__).resolve().parents[1] / "workflows/publish.yml").read_text()
+        inline = source.split("python3 -B -E -s - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        tree = ast.parse(textwrap.dedent(inline))
+        check = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "check")
+        start = next(i for i, node in enumerate(tree.body)
+                     if isinstance(node, ast.FunctionDef) and node.name == "package_metadata")
+        # Execute the actual new inline functions/loop, never any real HTTP transport.
+        program = compile(ast.Module(body=[check, *tree.body[start:]], type_ignores=[]), "access-check-inline", "exec")
+        names = sorted(policy.GROUP + "." + module + suffix for module in policy.MODULES
+                       for suffix in policy.PUBLICATIONS.values())
+        packages = [{"id": i + 1, "name": name, "package_type": "maven",
+                     "repository": {"id": 1310736214, "full_name": "kira-manga/kira-source-engine"}}
+                    for i, name in enumerate(names)]
+        for mode in ("pass", "classic_refusal", "comparison_refusal", "bad_version", "bad_package"):
+            with self.subTest(mode=mode):
+                calls = []
+                selected = copy.deepcopy(packages)
+                if mode == "bad_package":
+                    selected[0]["name"] = selected[1]["name"]
+
+                def observe(path, token, *, collection=False, package_read=False):
+                    self.assertTrue(collection)
+                    if path == "/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1":
+                        self.assertEqual((token, package_read), ("synthetic_classic", True))
+                        values = selected
+                    else:
+                        parsed = urllib.parse.urlsplit(path)
+                        self.assertIn(parsed.path, ["/orgs/kira-manga/packages/maven/" + name + "/versions"
+                                                  for name in names])
+                        query = urllib.parse.parse_qs(parsed.query)
+                        self.assertEqual(set(query), {"state", "per_page", "page"})
+                        self.assertIn(query["state"], (["active"], ["deleted"]))
+                        self.assertEqual((query["per_page"], query["page"]), (["100"], ["1"]))
+                        calls.append((parsed.path, query["state"][0], token, package_read))
+                        if ((mode == "classic_refusal" and len(calls) == 1)
+                                or (mode == "comparison_refusal" and token != "synthetic_classic")):
+                            raise receipts.ReceiptObservationRefusal(403, "request")
+                        values = [{"id": 101, "name": "0.1.0"}]
+                        if mode == "bad_version" and len(calls) == 1:
+                            values = [{"id": 101, "name": "unvalidated/body-or-token\n"}]
+                    return {"value": values, "status": 200, "oauth_scopes": ["read:packages"]}
+
+                output = io.StringIO()
+                scope = {"json": json, "re": re, "urllib": urllib, "reader": reader, "failed": [],
+                         "receipts": SimpleNamespace(observe_json=observe,
+                             ReceiptObservationRefusal=receipts.ReceiptObservationRefusal),
+                         "package_token": "synthetic_classic", "policy_token": "synthetic_policy",
+                         "job_token": "synthetic_job"}
+                with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                    exec(program, scope)
+                self.assertEqual(stopped.exception.code, int(mode in ("classic_refusal", "bad_version", "bad_package")))
+                records = [json.loads(line.removeprefix("KIRA_CREDENTIAL_CHECK "))
+                           for line in output.getvalue().splitlines()]
+                versions = [row for row in records if row["check"] == "package_versions"]
+                if mode == "bad_package":
+                    self.assertEqual((calls, versions), ([], []))
+                    continue
+                self.assertEqual(len(calls), 34)
+                self.assertEqual(len(versions), 34)
+                self.assertEqual({(path, state) for path, state, _, _ in calls[:30]},
+                                 {("/orgs/kira-manga/packages/maven/" + name + "/versions", state)
+                                  for name in names for state in ("active", "deleted")})
+                self.assertTrue(all((token, classic) == ("synthetic_classic", True) for _, _, token, classic in calls[:30]))
+                self.assertEqual([(token, classic) for _, _, token, classic in calls[30:]],
+                                 [("synthetic_policy", False)] * 2 + [("synthetic_job", False)] * 2)
+                self.assertTrue(all(path.endswith("/" + names[0] + "/versions") for path, _, _, _ in calls[30:]))
+                self.assertTrue(all(row["required"] == (i < 30) and row["diagnostic_only"]
+                                    and not row["custody_approval"] for i, row in enumerate(versions)))
+                for row in versions:
+                    self.assertIn(row["package"], names)
+                    self.assertIn(row["state"], ("active", "deleted"))
+                    if row["result"] == "FAIL":
+                        self.assertIn((row["http_status"], row["stage"]), ((403, "request"), (200, "response_validation")))
+                for secret in ("synthetic_classic", "synthetic_policy", "synthetic_job", "unvalidated/body-or-token"):
+                    self.assertNotIn(secret, output.getvalue())
 
 
 class RefusalDiagnosticTests(unittest.TestCase):
