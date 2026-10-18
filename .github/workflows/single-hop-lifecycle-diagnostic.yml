@@ -1,0 +1,66 @@
+name: Owned single-hop server lifecycle diagnostic
+
+on:
+  push:
+    branches: [remediation/priority-sources-20261017]
+    paths:
+      - .github/workflows/single-hop-lifecycle-diagnostic.yml
+      - .github/scripts/single_hop_lifecycle_diagnostic.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kira-owned-single-hop-lifecycle-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  server-lifecycle:
+    if: >-
+      ${{ github.event_name == 'push' && github.repository == 'kira-manga/kira-source-engine' &&
+          github.repository_owner == 'kira-manga' && github.repository_id == '1310736214' &&
+          github.run_attempt == 1 && github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/single-hop-lifecycle-diagnostic.yml@refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_sha == github.sha }}
+    runs-on: macos-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Exact reviewed diagnostic control
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - name: Exact unchanged App fixture source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: kira-manga/kira-app
+          ref: 88ec235bcc2530fe458a25221dcf16eee1e4535d
+          path: app
+          persist-credentials: false
+      - name: Original orphaned HTTPS server prepare and cleanup, at most six attempts
+        id: probe
+        timeout-minutes: 3
+        # Simulator setup alone is a no-op. No Gradle, simulator, keychain or product client runs.
+        run: /usr/bin/python3 -I -B .github/scripts/single_hop_lifecycle_diagnostic.py run
+      - name: Always original owned server cleanup backstop
+        if: ${{ always() && steps.probe.outputs.root != '' }}
+        timeout-minutes: 1
+        run: /usr/bin/python3 -I -B .github/scripts/single_hop_lifecycle_diagnostic.py cleanup
+      - name: Retain only sanitized fixed-phase ownership diagnostics
+        id: evidence
+        if: ${{ always() && steps.probe.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-single-hop-lifecycle-${{ github.run_id }}-1
+          path: ${{ steps.probe.outputs.root }}/evidence/
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+      - name: Dispose only the verified owned diagnostic root
+        if: ${{ always() && steps.evidence.outcome == 'success' && steps.probe.outputs.root != '' }}
+        run: /usr/bin/python3 -I -B .github/scripts/single_hop_lifecycle_diagnostic.py dispose
