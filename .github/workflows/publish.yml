@@ -1,6 +1,7 @@
 name: Protected single-owner source publication
 
-# Only the protected job may write the independently selected immutable cohort.
+# Only the protected native publisher may upload the independently selected immutable cohort.
+# A separate owner-approved, protected metadata probe holds mutation-capable credentials but only performs GET.
 # Single-owner PR policy retains required CI; real named environment approval,
 # no admin bypass, fresh writer-window admission and exact native byte guards remain.
 
@@ -17,6 +18,12 @@ on:
         type: boolean
         default: false
 
+      metadata_audit_check:
+        description: Protected GET-only probe of mutation-capable short-lived package metadata access; cannot publish
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   contents: read
   actions: read
@@ -29,7 +36,7 @@ concurrency:
 jobs:
   approval-and-access-check:
     if: >-
-      ${{ inputs.access_check && github.event_name == 'workflow_dispatch' &&
+      ${{ inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch' &&
           github.repository == 'kira-manga/kira-source-engine' && github.repository_id == '1310736214' &&
           github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
           github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
@@ -193,9 +200,115 @@ jobs:
               shutil.rmtree(root)
           PY
 
+  approval-and-metadata-audit:
+    if: >-
+      ${{ inputs.metadata_audit_check && !inputs.access_check && github.event_name == 'workflow_dispatch' &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_id == '1310736214' &&
+          github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    # Owner-authorized privileged metadata probe, NOT a read-only credential or release receipt.
+    # This isolated job can mutate packages at GitHub, but its reviewed code only issues GET.
+    environment: source-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out only reviewed GET helpers without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: metadata-audit
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/scripts/publication_policy.py
+            /.github/scripts/github_publication_receipts.py
+            /.github/scripts/remote_maven_readback.py
+
+      - name: Probe only fixed Engine metadata GETs with the separate short-lived audit capability
+        env:
+          KIRA_METADATA_AUDIT_JOB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import json, os, pathlib, sys
+          token = os.environ.pop('KIRA_METADATA_AUDIT_JOB_TOKEN')
+          helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'metadata-audit/.github/scripts'
+          sys.path.insert(0, str(helpers))
+          import github_publication_receipts as receipts
+          import remote_maven_readback as reader
+          failed = []
+          def check(name, operation, **context):
+              record = {'check': name, 'method': 'GET', 'credential_channel': 'short_lived_metadata_audit',
+                  'mutation_capable_credential': True, 'diagnostic_only': True, 'custody_approval': False, **context}
+              try:
+                  details = operation()
+                  print('KIRA_METADATA_AUDIT ' + json.dumps(
+                      {**record, 'result': 'PASS', **details}, sort_keys=True), flush=True)
+                  return details
+              except Exception as error:
+                  failed.append(name)
+                  print('KIRA_METADATA_AUDIT ' + json.dumps(
+                      {**record, 'result': 'FAIL', 'http_status': getattr(error, 'status', None),
+                          'stage': getattr(error, 'stage', None)}, sort_keys=True), flush=True)
+          def inventory():
+              if not token:
+                  raise receipts.ReceiptObservationRefusal(None, 'token_validation')
+              response = receipts.observe_json('/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1',
+                  token, collection=True)
+              try:
+                  items = [v for v in response['value'] if (v.get('repository') or {}).get('id') == 1310736214]
+                  expected = {reader.policy.GROUP + '.' + module + suffix for module in reader.policy.MODULES
+                      for suffix in reader.policy.PUBLICATIONS.values()}
+                  if (len(items) != 15 or {v['name'] for v in items} != expected
+                          or len({v['id'] for v in items}) != 15
+                          or any(type(v['id']) is not int or not 0 < v['id'] <= 2**63 - 1
+                              or v['package_type'] != 'maven'
+                              or v['repository']['full_name'] != 'kira-manga/kira-source-engine' for v in items)):
+                      raise ValueError('Exact Engine inventory required')
+                  packages = [{'id': v['id'], 'name': v['name']} for v in sorted(items, key=lambda v: v['name'])]
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'packages': packages}
+          def versions(item, state):
+              # Names come only from the exact trusted fifteen-name inventory above, never dispatch input.
+              response = receipts.observe_json('/orgs/kira-manga/packages/maven/' + item['name'] +
+                  '/versions?state=' + state + '&per_page=100&page=1', token, collection=True)
+              try:
+                  values = reader._versions(response['value'])
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'versions': values}
+          # At most31 GETs. No pagination/retries/redirects; shared transport retains its bounds.
+          metadata = check('package_inventory', inventory)
+          if metadata is not None:
+              for item in metadata['packages']:
+                  for state in ('active', 'deleted'):
+                      check('package_versions', lambda: versions(item, state),
+                          package=item['name'], package_id=item['id'], state=state)
+          # This mode yields no artifact/output consumed by preflight or the native publisher.
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Remove only this metadata audit's disposable helper checkout
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'metadata-audit'
+          if root.is_symlink():
+              raise SystemExit('Redirected metadata audit cleanup refused')
+          if root.exists():
+              shutil.rmtree(root)
+          PY
+
   preflight:
     if: >-
-      ${{ !inputs.access_check && github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
+      ${{ !inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
           github.repository_id == '1310736214' && github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' &&
           github.repository_owner == 'kira-manga' && github.run_attempt == 1 &&
           github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
