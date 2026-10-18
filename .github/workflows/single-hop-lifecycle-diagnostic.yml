@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: 88ec235bcc2530fe458a25221dcf16eee1e4535d
+          ref: bf15e10f7131bf6b362c72ca714ed26a6489ca75
           path: app
           persist-credentials: false
       - name: Original orphaned HTTPS server prepare and cleanup, at most six attempts

@@ -17,8 +17,8 @@ import time
 
 SCRIPT = Path(__file__).resolve()
 WORKFLOW = ".github/workflows/single-hop-lifecycle-diagnostic.yml"
-APP_SHA = "88ec235bcc2530fe458a25221dcf16eee1e4535d"
-HELPER_SHA = "beaf23922b058941694fd2b46c3c2730264d9d80516b4853e73ce7d213885a90"
+APP_SHA = "bf15e10f7131bf6b362c72ca714ed26a6489ca75"
+HELPER_SHA = "71134806fa7e1707e7d48766028041b3db6588936e749429f2d2316dc26f021f"
 REF = "refs/heads/remediation/priority-sources-20261017"
 PS = ["/bin/ps", "-ww", "-axo", "pid=,stat=,command="]
 CONTEXT = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID",
@@ -68,9 +68,11 @@ def runtime():
 
 def error_code(error, helper):
     # These line identities are admitted only with the exact HELPER_SHA above.
-    reasons = {25: "metadata_file_bound", 230: "ps_output_bound", 236: "pid_match_cardinality",
-               239: "recorded_pid_shape", 240: "recorded_pid_argv_identity", 247: "signal_delivery",
-               255: "stop_exhausted", 277: "owner_mismatch", 290: "cleanup_action_failure"}
+    reasons = {25: "metadata_file_bound", 230: "ps_output_bound", 237: "pid_match_cardinality",
+               238: "wait_pid_identity", 241: "recorded_pid_or_wait_identity",
+               242: "recorded_pid_argv_identity", 243: "recorded_pid_argv_identity",
+               250: "before_signal_pid_change", 252: "signal_delivery", 261: "stop_exhausted",
+               283: "owner_mismatch", 296: "cleanup_action_failure"}
     trace, reason = error.__traceback__, "unclassified_failure"
     while trace:
         if trace.tb_frame.f_code.co_filename == str(helper):
@@ -111,12 +113,12 @@ def phase(root, fixture, helper, action, label):
             event({"recorded_pid": recorded, "exists": bool(row), "state": state, "args_match": matches})
         return output  # Original output and all original assertions are unchanged.
 
-    def observed_pids(owned_root):
+    def observed_pids(owned_root, waiting_for=None):
         nonlocal position
         caller = sys._getframe(1)
-        position = {245: "before_signal", 252: "await_exit"}.get(caller.f_lineno, "other_call")
+        position = {249: "before_signal", 258: "await_exit"}.get(caller.f_lineno, "other_call")
         try:
-            return original_pids(owned_root)
+            return original_pids(owned_root, waiting_for)
         except Exception as error:
             event({"reason": error_code(error, helper)})
             raise
