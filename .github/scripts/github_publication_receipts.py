@@ -24,8 +24,11 @@ BYPASS_QUERY = (
 )
 
 
-def _request_json(path, token, *, bypass_branch=None):
+def _request_json(path, token, *, bypass_branch=None, collection=False, package_read=False, observation=None):
     """Fixed-host GET or fixed bypass query; DNS has no separately enforced hard deadline."""
+    policy.require(type(collection) is bool and type(package_read) is bool
+                   and (not (collection or package_read) or bypass_branch is None),
+                   "Receipt response mode refused")
     body = None
     if bypass_branch is not None:
         policy.require(path == "/graphql" and token is not None, "Explicit bypass read token required")
@@ -49,6 +52,9 @@ def _request_json(path, token, *, bypass_branch=None):
             headers["Content-Type"] = "application/json"
             connection.request("POST", "/graphql", body=body, headers=headers)
         response = connection.getresponse()
+        if observation is not None:
+            observation["status"] = response.status
+            observation["stage"] = "response_validation"
         policy.require(response.status == 200, "Official receipt HTTP status refused")
         age = response.getheader("Age")
         policy.require(age is None or (re.fullmatch(r"[0-9]{1,8}", age) is not None and int(age) == 0),
@@ -59,6 +65,9 @@ def _request_json(path, token, *, bypass_branch=None):
                        in ("application/json", "application/vnd.github+json"), "Non-JSON receipt refused")
         link = response.getheader("Link")
         policy.require(not link or link == DEPRECATION_LINK, "Paginated receipt refused")
+        scopes = _package_read_scopes(response.getheader("X-OAuth-Scopes")) if package_read else None
+        if observation is not None:
+            observation["oauth_scopes"] = scopes
         length = response.getheader("Content-Length")
         if length is not None:
             policy.require(re.fullmatch(r"[0-9]{1,8}", length) is not None
@@ -75,6 +84,9 @@ def _request_json(path, token, *, bypass_branch=None):
             policy.require(len(data) <= policy.MAX_META, "Receipt byte bound exceeded")
         policy.require(length is None or len(data) == length, "Truncated receipt refused")
         value = policy.json_data(bytes(data))
+        if collection:
+            policy.require(type(value) is list and len(value) < 100, "Complete bounded receipt collection required")
+            return {"items": value, "oauth_scopes": scopes}
         policy.require(type(value) is dict, "Receipt object required")
         return value
     finally:
@@ -87,6 +99,47 @@ def _request_json(path, token, *, bypass_branch=None):
 
 def _get_json(path, token):
     return _request_json(path, token)
+
+
+def _package_read_scopes(value):
+    """The selected channel is a classic read:packages token, not the write job token."""
+    policy.require(type(value) is str and 0 < len(value) <= 2048, "Classic package-read scope metadata required")
+    scopes = [item.strip() for item in value.split(",")]
+    policy.require(1 <= len(scopes) <= 64 and len(scopes) == len(set(scopes))
+                   and all(re.fullmatch(r"[a-z][a-z0-9:_-]{0,80}", item) is not None for item in scopes)
+                   and "read:packages" in scopes and not ({"write:packages", "delete:packages"} & set(scopes)),
+                   "Package-read token grants refused")
+    return sorted(scopes)
+
+
+def _get_collection(path, token, *, package_read=False):
+    """Explicit fixed-host GET collection; old object callers retain their exact contract."""
+    _validate_read_token(token)
+    policy.require(token is not None, "Explicit collection read token required")
+    return _request_json(path, token, collection=True, package_read=package_read)
+
+
+class ReceiptObservationRefusal(policy.Refusal):
+    def __init__(self, status, stage):
+        super().__init__("Official receipt observation refused")
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.stage = stage if stage in ("token_validation", "request", "response_validation") else "request"
+
+
+def observe_json(path, token, *, collection=False, package_read=False):
+    """One existing transport read plus safe status/scopes; never exception/body diagnostics.
+
+    The caller may inspect the returned data but must not print raw API responses. Existing
+    _get_json callers, validation, exceptions and object-only results remain unchanged.
+    """
+    metadata = {"status": None, "oauth_scopes": None, "stage": "token_validation"}
+    try:
+        _validate_read_token(token)
+        metadata["stage"] = "request"
+        value = _request_json(path, token, collection=collection, package_read=package_read, observation=metadata)
+        return {"value": value["items"] if collection else value, **metadata}
+    except Exception:
+        raise ReceiptObservationRefusal(metadata["status"], metadata["stage"]) from None
 
 
 def _validate_read_token(token):
