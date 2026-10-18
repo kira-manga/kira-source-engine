@@ -524,5 +524,50 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
             self.assertIn(pin, source)
 
 
+class RefusalDiagnosticTests(unittest.TestCase):
+    def test_suppressed_chain_reports_only_trusted_code_locations(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise AssertionError("Exception text must never be rendered")
+
+        try:
+            try:
+                receipts._bypass_object(None, set())
+            except policy.Refusal:
+                raise UnprintableError("synthetic credential and response body") from None
+        except UnprintableError as error:
+            result = workflow.refusal_sites(error)
+        self.assertRegex(result, r"github_publication_receipts\.py:[0-9]+ > publication_policy\.py:[0-9]+$")
+        self.assertNotIn("test_publisher_workflow", result)
+        self.assertNotIn("synthetic", result)
+        self.assertNotIn("/", result)
+
+    def test_external_filename_cycles_and_deep_chains_are_bounded(self):
+        try:
+            exec(compile("raise ValueError('synthetic credential')", "/untrusted/publication_policy.py", "exec"), {})
+        except ValueError as error:
+            error.__context__ = error
+            self.assertEqual(workflow.refusal_sites(error), "unavailable")
+        outer = None
+        for _ in range(40):
+            try:
+                policy.require(False, "synthetic credential")
+            except policy.Refusal as error:
+                error.__cause__ = outer
+                outer = error
+        result = workflow.refusal_sites(outer)
+        self.assertEqual(len(result.split(" > ")), 8)
+        self.assertTrue(all(site.startswith("publication_policy.py:") for site in result.split(" > ")))
+
+    def test_cli_failure_remains_failure_with_safe_location_not_input(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = workflow.main(["synthetic-secret-invalid-command"])
+        self.assertEqual(result, 1)
+        self.assertIn("Publisher workflow refused", stderr.getvalue())
+        self.assertIn("Publisher refusal code sites: publisher_workflow.py:", stderr.getvalue())
+        self.assertNotIn("synthetic-secret", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
