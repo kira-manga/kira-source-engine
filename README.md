@@ -505,22 +505,31 @@ of passing qualification; the separate diagnostic below fixes only its own appro
 
 The existing `publish.yml` also offers an explicit `access_check=true` dispatch with
 `selection={}`. It exercises the fixed `source-publication` native approval boundary
-and bounded read-only requests using the built-in package-read job token. A sparse
-checkout of the exact workflow commit additionally exercises the actual reader on
-the known `0.1.0` POM, requiring its coordinates to match and reporting only byte
-size/hash. Registry credentials never reach the one permitted HTTPS storage hop.
-The disposable checkout is removed immediately. There are no stored secrets,
-artifacts, publisher outputs or write permissions, and publisher jobs are skipped.
-A successful job proves the known POM reader check passed, **not** that every other
-reported HTTP request succeeded, a version is unused, or publication was approved.
-Inspect the actual approval metadata and individual HTTP observations. This check
-does not replace the scoped policy-read credential or any normal publication gate.
+and bounded read-only requests using explicitly provisioned `KIRA_PUBLICATION_API_READ_TOKEN`
+and `KIRA_PACKAGES_READ_TOKEN` repository secrets, never a job-token fallback. A sparse
+checkout of the exact workflow commit uses the existing API adapter to check Engine
+metadata, administration, contents, run, attestation and environment read ports. The
+package token's public account identity and the known `0.1.0` POM are checked with the
+actual reader, requiring matching coordinates. Registry credentials never reach the
+one permitted HTTPS storage hop. Only fixed check results/error classes and public
+account/POM byte facts are reported; credential values are not persisted or printed.
+Every distinct check is attempted; any failure fails the job. The disposable checkout
+is always cleaned up. There are no artifacts, publisher outputs or write permissions,
+and publisher jobs are skipped. Success proves these selected read checks passed,
+**not** protected publication eligibility, an unused version or package-write authority.
+Inspect the actual native approval metadata separately; this diagnostic does not
+replace any normal publication gate or grant approval to a later invocation.
 
 The separate `acquire_publisher_policy` API reuses the bounded fixed-host transport.
 It requires explicitly selected User reviewer IDs, explicit `prevent_self_review=false` (owner-authorized),
 admin-bypass denial, one literal publisher-branch policy and exact protected branch
-tips/review counts/status-check app identities. Missing proof, unknown rules, HTTP errors
-or changed tag/lineage facts refuse; no policy discovery is performed.
+tips/status-check app identities. The owner-authorized single-owner source policy requires
+integer `approvals=0`, observed `required_approving_review_count=0` and literal
+`require_last_push_approval=false`; stale-review dismissal remains required. This removes
+mandatory external source approval, not legitimate PR/merged-commit lineage, required CI,
+admin enforcement or zero-bypass checks. No source approval is fabricated; the separate
+named owner deployment approval must still actually occur. Missing proof, unknown rules,
+HTTP errors or changed tag/lineage facts refuse; no policy discovery is performed.
 
 Branch selections retain `name`, `tip`, `approvals` and `checks`, with one optional
 `bypass_rule_id`: an independently selected 1–256-character non-whitespace printable

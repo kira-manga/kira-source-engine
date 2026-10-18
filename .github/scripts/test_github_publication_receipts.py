@@ -20,9 +20,9 @@ def publisher_selection():
                  "source_sha": sha, "workflow_sha": sha, "run_id": 61, "run_attempt": 1, "workflow_id": 18}
     protection = {"environment": {"id": 71, "name": "publisher/release gate", "branch_policy_id": 501,
                                    "reviewer_ids": [81, 82]},
-                  "branches": [{"name": p.BRANCH, "tip": "e" * 40, "approvals": 2,
+                  "branches": [{"name": p.BRANCH, "tip": "e" * 40, "approvals": 0,
                                 "checks": [{"context": "verify", "app_id": 121}]},
-                               {"name": ref[len("refs/heads/"):], "tip": sha, "approvals": 2,
+                               {"name": ref[len("refs/heads/"):], "tip": sha, "approvals": 0,
                                 "checks": [{"context": "verify", "app_id": 121}]}],
                   "tag": {"name": "v1.2.3", "object": "9" * 40}}
     return publisher, protection
@@ -61,7 +61,7 @@ def publisher_policy_values(publisher=None, protection=None):
         values.append({"enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False},
                        "allow_deletions": {"enabled": False},
                        "required_pull_request_reviews": {"required_approving_review_count": item["approvals"],
-                                                         "dismiss_stale_reviews": True, "require_last_push_approval": True,
+                                                         "dismiss_stale_reviews": True, "require_last_push_approval": False,
                                                          "bypass_pull_request_allowances": {"users": [], "teams": [], "apps": []}},
                        "required_status_checks": {"strict": True, "checks": copy.deepcopy(item["checks"]),
                                                   "contexts": [check["context"] for check in item["checks"]]}})
@@ -458,6 +458,7 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
             publisher_branch + "/protection", prefix + "/actions/runs/61")])
         self.assertEqual(result["publisher"], selected_publisher)
         self.assertEqual(result["branches"], selected_protection["branches"])
+        self.assertEqual([branch["approvals"] for branch in result["branches"]], [0, 0])
         self.assertEqual(result["environment"]["reviewer_ids"], [81, 82])
         self.assertIs(result["environment"]["prevent_self_review"], False)
         self.assertNotIn("approved", json.dumps(result))
@@ -474,6 +475,7 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
                  ("environment", "reviewer_ids", []), ("environment", "reviewer_ids", [81, 81]),
                  ("environment", "reviewer_ids", [True]), ("environment", "name", "bad%2Fname"),
                  ("environment", "branch_policy_id", 0), ("branch", "name", "other"),
+                 ("branch", "approvals", 1), ("branch", "approvals", False), ("branch", "approvals", 0.0),
                  ("branch", "checks", []), ("branch", "checks", [{"context": "verify", "app_id": None}]),
                  ("tag", "name", "../v1.2.3"), ("tag", "object", "short")]
         for group, key, value in edits:
@@ -533,7 +535,7 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
 
     def test_protected_lineage_checks_refuse_missing_bypass_or_ambiguous_check_authority(self):
         for index in (6, 8):
-            for kind in ("admins", "force", "delete", "count", "stale", "last-push", "missing-bypass",
+            for kind in ("admins", "force", "delete", "count", "count-bool", "stale", "last-push", "missing-bypass",
                          "bypass", "strict", "check-app", "contexts"):
                 with self.subTest(index=index, kind=kind):
                     values = publisher_policy_values()
@@ -542,10 +544,10 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
                     if kind in ("admins", "force", "delete"):
                         key = {"admins": "enforce_admins", "force": "allow_force_pushes", "delete": "allow_deletions"}[kind]
                         branch[key]["enabled"] = kind != "admins"
-                    elif kind in ("count", "stale", "last-push"):
-                        key = {"count": "required_approving_review_count", "stale": "dismiss_stale_reviews",
-                               "last-push": "require_last_push_approval"}[kind]
-                        reviews[key] = 1 if kind == "count" else False
+                    elif kind in ("count", "count-bool", "stale", "last-push"):
+                        key = {"count": "required_approving_review_count", "count-bool": "required_approving_review_count",
+                               "stale": "dismiss_stale_reviews", "last-push": "require_last_push_approval"}[kind]
+                        reviews[key] = {"count": 1, "count-bool": False, "stale": False, "last-push": True}[kind]
                     elif kind == "missing-bypass":
                         del reviews["bypass_pull_request_allowances"]
                     elif kind == "bypass":

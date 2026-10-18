@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       access_check:
-        description: Read-only native approval and built-in package-read check; cannot publish
+        description: Verify provisioned policy/package read credentials after native approval; cannot publish
         required: false
         type: boolean
         default: false
@@ -42,64 +42,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - name: Observe existing built-in package access after genuine native approval
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_ACTOR: ${{ github.actor }}
-        shell: bash
-        run: |
-          python3 -B - <<'PY'
-          import base64, hashlib, json, os, re, ssl, urllib.error, urllib.parse, urllib.request
-          token, actor = os.environ.pop('GH_TOKEN'), os.environ.pop('GH_ACTOR')
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, *args, **kwargs):
-                  return None
-          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
-              urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-          basic = base64.b64encode((actor + ':' + token).encode()).decode()
-          requests = (
-              ('package_inventory', 'https://api.github.com/orgs/kira-manga/packages?package_type=maven&per_page=100', 'Bearer ' + token),
-              ('published_0_1_pom', 'https://maven.pkg.github.com/kira-manga/kira-source-engine/me/manga/kira/source/source-engine/0.1.0/source-engine-0.1.0.pom', 'Basic ' + basic),
-          )
-          for name, url, auth in requests:
-              result = {'check': name, 'read_only': True}
-              try:
-                  req = urllib.request.Request(url, headers={'Authorization': auth,
-                      'User-Agent': 'Kira-publication-access-check', 'X-GitHub-Api-Version': '2022-11-28'})
-                  try:
-                      response = opener.open(req, timeout=10)
-                  except urllib.error.HTTPError as error:
-                      response = error
-                  with response:
-                      body = response.read(1048577)
-                      result.update(status=response.status, within_bound=len(body) <= 1048576,
-                          complete_page=response.headers.get('Link') is None)
-                      if 300 <= response.status < 400:
-                          locations = response.headers.get_all('Location', [])
-                          result['redirect_location_count'] = len(locations)
-                          if len(locations) == 1 and len(locations[0]) <= 8192:
-                              target = urllib.parse.urlsplit(locations[0])
-                              host = target.hostname or ''
-                              result['redirect_https'] = target.scheme == 'https'
-                              # Never log a signed URL, userinfo, path or query, or follow it.
-                              if re.fullmatch(r'[A-Za-z0-9.-]{1,253}', host):
-                                  result['redirect_host'] = host
-                      if response.status == 200 and len(body) <= 1048576:
-                          result['sha256'] = hashlib.sha256(body).hexdigest()
-                          if name == 'package_inventory':
-                              items = json.loads(body)
-                              engine = [item for item in items
-                                  if (item.get('repository') or {}).get('id') == 1310736214]
-                              result['visible_engine_packages'] = len(engine)
-                              result['engine_package_visibility'] = {
-                                  visibility: sum(item.get('visibility') == visibility for item in engine)
-                                  for visibility in ('public', 'private', 'internal')}
-              except Exception as error:
-                  result['error_class'] = type(error).__name__
-              print('KIRA_PUBLICATION_ACCESS ' + json.dumps(result, sort_keys=True))
-          PY
-
-      - name: Check out only the selected readback helpers without persisted credentials
+      - name: Check out only the reviewed read helpers without persisted credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.workflow_sha }}
@@ -108,26 +51,67 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /.github/scripts/publication_policy.py
+            /.github/scripts/github_publication_receipts.py
             /.github/scripts/remote_maven_readback.py
 
-      - name: Verify an actual known Maven POM with the selected production reader
+      - name: Verify provisioned policy and package credentials through their actual read ports
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_ACTOR: ${{ github.actor }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
         shell: bash
         run: |
           python3 -B -E -s - <<'PY'
-          import json, os, pathlib, sys, xml.etree.ElementTree as ET
-          token, actor = os.environ.pop('GH_TOKEN'), os.environ.pop('GH_ACTOR')
+          import json, os, pathlib, re, sys, xml.etree.ElementTree as ET
+          policy_token = os.environ.pop('KIRA_PUBLICATION_API_READ_TOKEN')
+          package_token = os.environ.pop('KIRA_PACKAGES_READ_TOKEN')
           helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check/.github/scripts'
           sys.path.insert(0, str(helpers))
-          try:
-              import remote_maven_readback as reader
+          import github_publication_receipts as receipts
+          import remote_maven_readback as reader
+          failed = []
+          def check(name, operation):
+              try:
+                  details = operation()
+                  print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
+                      {'check': name, 'result': 'PASS', 'read_only': True, **details}, sort_keys=True))
+              except Exception as error:
+                  failed.append(name)
+                  print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
+                      {'check': name, 'result': 'FAIL', 'error_class': type(error).__name__}, sort_keys=True))
+          def api(name, path, accept):
+              def operation():
+                  if not policy_token:
+                      raise ValueError('Missing explicit policy token')
+                  value = receipts._get_json(path, policy_token)
+                  if not accept(value):
+                      raise ValueError('Unexpected official read identity')
+                  return {'http_status': 200}
+              check(name, operation)
+          repo = '/repos/kira-manga/kira-source-engine'
+          api('repository_metadata', repo, lambda v: v.get('id') == 1310736214)
+          api('administration_read', repo + '/actions/permissions', lambda v: v.get('enabled') is True)
+          api('contents_read', repo + '/git/ref/heads/remediation/production-readiness-2026-09-04',
+              lambda v: v.get('ref') == 'refs/heads/remediation/production-readiness-2026-09-04')
+          api('actions_read', repo + '/actions/runs/39048582890',
+              lambda v: v.get('id') == 39048582890 and v.get('head_sha') == '901bae34291f5baf8dcf104223b27d1d5cd1d15e')
+          api('attestations_read', repo + '/attestations/sha256:9a81ab0ed2befed10ea7c716fdd03d5d8346b74c171fd49df9b7128abff3439b?per_page=1&page=1',
+              lambda v: isinstance(v.get('attestations'), list) and len(v['attestations']) == 1)
+          api('environment_read', repo + '/environments/source-publication',
+              lambda v: v.get('id') == 24588601457 and v.get('can_admins_bypass') is False)
+          api('environment_branch_policy_read', repo + '/environments/source-publication/deployment-branch-policies?per_page=100&page=1',
+              lambda v: v.get('total_count') == 1 and v.get('branch_policies', [{}])[0].get('id') == 63403649)
+          def maven():
+              if not package_token:
+                  raise ValueError('Missing explicit package token')
+              user = receipts._get_json('/user', package_token)
+              actor = user.get('login', '')
+              if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}', actor):
+                  raise ValueError('Invalid package-token account')
               budget = reader._Budget()
               budget.requests = 2
               facts, body = reader._read(
                   'me/manga/kira/source/source-engine/0.1.0/source-engine-0.1.0.pom',
-                  (actor, token), 1048576, budget, capture=True)
+                  (actor, package_token), 1048576, budget, capture=True)
               if b'<!DOCTYPE' in body or b'<!ENTITY' in body:
                   raise ValueError('POM entity declaration refused')
               pom = ET.fromstring(body.decode('utf-8'))
@@ -135,12 +119,11 @@ jobs:
               if pom.tag != ns + 'project' or [pom.findtext(ns + key) for key in
                       ('groupId', 'artifactId', 'version')] != ['me.manga.kira.source', 'source-engine', '0.1.0']:
                   raise ValueError('Known POM identity differs')
-              print('KIRA_MAVEN_READER ' + json.dumps({'result': 'PASS', 'read_only': True,
-                  'version': '0.1.0', 'size': facts['size'], 'sha256': facts['sha256'],
-                  'requests': 2 - budget.requests}, sort_keys=True))
-          except Exception as error:
-              print('KIRA_MAVEN_READER ' + json.dumps({'result': 'FAIL', 'error_class': type(error).__name__}))
-              raise SystemExit(1) from None
+              return {'username': actor, 'version': '0.1.0', 'size': facts['size'],
+                  'sha256': facts['sha256'], 'requests': 2 - budget.requests}
+          check('provisioned_maven_read', maven)
+          # Check every distinct port even if another fails; never fall back to the job token.
+          raise SystemExit(1 if failed else 0)
           PY
 
       - name: Remove only this diagnostic's disposable helper checkout

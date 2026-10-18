@@ -243,7 +243,8 @@ def validated_publisher_request(publisher, protection, *, token=None):
         for item in branches:
             policy.require(type(item) is dict and set(item) in (branch_fields, branch_fields | {"bypass_rule_id"})
                            and policy.hex_value(item["tip"], 40), "Branch selection refused")
-            policy.require(_selected_id(item["approvals"]) <= 6, "Review count refused")
+            # Owner-authorized single-owner source policy; never fabricate an approval.
+            policy.require(type(item["approvals"]) is int and item["approvals"] == 0, "Review count refused")
             branch_selection = {"name": _branch_name(item["name"]), "tip": item["tip"],
                                 "approvals": item["approvals"], "checks": _checks(item["checks"])}
             if "bypass_rule_id" in item:
@@ -306,7 +307,7 @@ def _branch_protection(value, selected):
         policy.require(type(value.get(key)) is dict and value[key].get("enabled") is enabled, "Branch policy refused")
     reviews = value.get("required_pull_request_reviews")
     policy.require(type(reviews) is dict and reviews.get("dismiss_stale_reviews") is True
-                   and reviews.get("require_last_push_approval") is True
+                   and reviews.get("require_last_push_approval") is False
                    and type(reviews.get("required_approving_review_count")) is int
                    and reviews["required_approving_review_count"] == selected["approvals"], "Branch review policy refused")
     needs_proof = "bypass_pull_request_allowances" not in reviews
