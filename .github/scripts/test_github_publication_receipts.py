@@ -741,6 +741,57 @@ class CollectionObservationTests(unittest.TestCase):
         self.assertEqual((caught.exception.status, caught.exception.stage), (None, "request"))
         self.assertEqual(str(caught.exception), "Official receipt observation refused")
 
+    def test_dedicated_audit_gets_only_fifteen_fixed_deleted_targets_with_honest_grants(self):
+        self.assertEqual(len(r.DELETED_PACKAGE_PATHS), 15)
+        for package, path in r.DELETED_PACKAGE_PATHS.items():
+            self.reset([], headers={"X-OAuth-Scopes": "read:packages,delete:packages"})
+            result = r._get_deleted_versions(package, "synthetic_AUDIT")
+            self.assertEqual(result, {"items": [], "oauth_scopes": ["delete:packages", "read:packages"]})
+            self.assertEqual(self.requests[0][0], ("GET", path))
+            self.assertEqual(self.requests[0][1]["headers"]["Authorization"], "Bearer synthetic_AUDIT")
+            self.assertNotIn("synthetic_AUDIT", json.dumps(result))
+            self.assertClosed()
+        self.reset([])
+        for name, token in (("https://untrusted.invalid", "synthetic_AUDIT"), ("/user", "synthetic_AUDIT"),
+                            (next(iter(r.DELETED_PACKAGE_PATHS)), None),
+                            (next(iter(r.DELETED_PACKAGE_PATHS)), "bad token")):
+            with self.subTest(name=name), self.assertRaises(p.Refusal):
+                r._get_deleted_versions(name, token)
+        for path, options in (("/user", {}), (next(iter(r.DELETED_PACKAGE_PATHS.values())), {"package_read": True})):
+            with self.assertRaises(p.Refusal):
+                r._request_json(path, "synthetic_AUDIT", collection=True, metadata_audit=True, **options)
+        self.assertEqual(self.requests, [])
+
+    def test_audit_missing_excess_or_changed_profile_and_incomplete_http_fail_closed(self):
+        name = next(iter(r.DELETED_PACKAGE_PATHS))
+        for scopes in (None, "", "read:packages", "delete:packages", "repo",
+                       "read:packages,delete:packages,write:packages", "read:packages,delete:packages,delete:packages"):
+            self.reset([], headers={} if scopes is None else {"X-OAuth-Scopes": scopes})
+            with self.subTest(scopes=scopes), self.assertRaises(p.Refusal):
+                r._get_deleted_versions(name, "synthetic_AUDIT")
+            self.assertClosed()
+        for value, headers, status in (([{}] * 100, {}, 200), ({}, {}, 200), ([], {}, 403),
+                                      ([], {"Link": '<https://api.github.com/next>; rel="next"'}, 200),
+                                      ([], {"Age": "1"}, 200), ([], {"Content-Encoding": "gzip"}, 200)):
+            self.reset(value, headers={"X-OAuth-Scopes": "read:packages,delete:packages"} | headers, status=status)
+            with self.subTest(status=status, headers=headers), self.assertRaises(r.ReceiptObservationRefusal) as caught:
+                r._get_deleted_versions(name, "synthetic_AUDIT")
+            self.assertEqual((caught.exception.status, caught.exception.stage), (status, "response_validation"))
+            self.assertEqual(str(caught.exception), "Official receipt observation refused")
+            self.assertTrue(caught.exception.__suppress_context__)
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
+        self.reset([])
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r._get_deleted_versions(name, "synthetic_AUDIT\n")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "token_validation"))
+        self.assertEqual(self.requests, [])
+        self.factory.side_effect = OSError("synthetic_PRIVATE_provider")
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r._get_deleted_versions(name, "synthetic_AUDIT")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "request"))
+        self.assertEqual(str(caught.exception), "Official receipt observation refused")
+
 
 if __name__ == "__main__":
     unittest.main()

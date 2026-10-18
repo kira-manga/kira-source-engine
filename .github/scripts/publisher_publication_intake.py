@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import socket
+import stat
 import sys
 import time
 
@@ -17,6 +20,10 @@ PRODUCER_FIELDS = {"repository", "ref", "workflow_ref", "workflow_sha", "source_
                    "workflow_sha256", "version", "run_id", "run_attempt", "workflow_id", "artifact_id",
                    "producer_job_id", "attestation_job_id", "archive_sha256", "inventory_sha256",
                    "seal_sha256", "transport_sha256"}
+AUDIT_SOCKET = "metadata-audit.sock"
+AUDIT_REQUEST_LIMIT = 512
+AUDIT_RESPONSE_LIMIT = 512 * 1024
+AUDIT_SECONDS = remote.COHORT_SECONDS + receipts.READ_SECONDS + 15
 
 
 def _parity_reference(value):
@@ -128,11 +135,13 @@ def _repository_window(selection, window, token):
             "workflows": sorted(observed, key=lambda item: item["id"]), "active_run_id": selection["publisher"]["run_id"]}
 
 
-def observe_release_window(selection, *, api_token, package_token, before=None, completed=(), progress=None):
+def observe_release_window(selection, *, api_token, package_token, deleted_observer=None,
+                           before=None, completed=(), progress=None):
     """Fresh repo/window and package facts. Native approval is the actual workflow boundary."""
     try:
         selected = _selection(selection, api_token)
         window = validate_release_window(selected)
+        policy.require(callable(deleted_observer), "Separate controller metadata audit required")
         if before is not None:
             policy.require(type(before) is dict and set(before) == {"control", "registry"}, "Window baseline refused")
             before = _metadata_copy(before)
@@ -144,7 +153,7 @@ def observe_release_window(selection, *, api_token, package_token, before=None, 
         policy.require(before is None or control == before["control"], "Repository window controls changed")
         policy.require(progress is None or control == progress["control"], "Window progress controls changed")
         registry = remote.observe_registry(window["packages"], selected["publisher"]["repository_id"],
-                                           selected["producer"]["version"], token=package_token,
+                                           selected["producer"]["version"], token=package_token, deleted_observer=deleted_observer,
                                            before=None if before is None else before["registry"], completed=completed,
                                            progress=None if progress is None else progress["registry"])
         _window_open(window)
@@ -257,6 +266,63 @@ def _invocation(context, selected):
                            for key, field in fields.items()), "Actual publisher context differs")
 
 
+def metadata_audit_binding(selected):
+    data = json.dumps(selected, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    policy.require(len(data) <= policy.MAX_META, "Metadata-audit selection bound exceeded")
+    return {"operation": "deleted-versions", "selection_sha256": policy.digest(data)}
+
+
+def metadata_audit_socket(archive, selected):
+    """Fixed sibling of the admitted archive, never an input-selected service/route."""
+    root = Path(archive).parent
+    policy.require(root.is_absolute() and not any(path.is_symlink() for path in (root, *root.parents))
+                   and root.name == "kira-publisher-" + str(selected["publisher"]["run_id"]) + "-1"
+                   and root.is_dir() and root.stat().st_uid == os.getuid()
+                   and stat.S_IMODE(root.stat().st_mode) == 0o700, "Metadata-audit root custody refused")
+    path = root / AUDIT_SOCKET
+    policy.require(len(os.fsencode(path)) <= 100, "Metadata-audit socket path bound exceeded")
+    return path
+
+
+def audit_receive(connection, limit, seconds):
+    data = bytearray()
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        policy.require(remaining > 0, "Metadata-audit receive time bound exceeded")
+        connection.settimeout(remaining)
+        chunk = connection.recv(min(8192, limit + 1 - len(data)))
+        policy.require(time.monotonic() < deadline, "Metadata-audit receive time bound exceeded")
+        if not chunk:
+            return policy.json_data(bytes(data))
+        data.extend(chunk)
+        policy.require(len(data) <= limit, "Metadata-audit message bound exceeded")
+
+
+def controller_deleted_versions(archive, selected):
+    """Only non-secret request/response bytes cross the owned local socket."""
+    path = metadata_audit_socket(archive, selected)
+    before = path.lstat()
+    policy.require(stat.S_ISSOCK(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600
+                   and before.st_uid == os.getuid(), "Metadata-audit socket custody refused")
+    request = metadata_audit_binding(selected) | {"nonce": secrets.token_hex(16)}
+    data = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    policy.require(len(data) <= AUDIT_REQUEST_LIMIT, "Metadata-audit request bound exceeded")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(AUDIT_SECONDS)
+        connection.connect(str(path))
+        connection.sendall(data)
+        connection.shutdown(socket.SHUT_WR)
+        response = audit_receive(connection, AUDIT_RESPONSE_LIMIT, AUDIT_SECONDS)
+    after = path.lstat()
+    policy.require((after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+                   == (before.st_dev, before.st_ino, before.st_uid, before.st_mode), "Metadata-audit socket changed")
+    policy.require(type(response) is dict and set(response) == set(request) | {"observation"}
+                   and all(response[key] == value for key, value in request.items()), "Metadata-audit response binding differs")
+    bindings = remote.package_bindings(selected["release_window"]["packages"], selected["publisher"]["repository_id"])
+    return remote._deleted_observation(response["observation"], bindings)
+
+
 def native_boundary(request):
     """Fixed Gradle stdin bridge. Credential-bearing request is never saved or returned.
 
@@ -320,6 +386,7 @@ def native_boundary(request):
                                              token=credentials["token"], active=active)
         actual_window = observe_release_window(selected, api_token=credentials["api_token"],
                                                package_token=credentials["token"], before=record["window"],
+                                               deleted_observer=lambda: controller_deleted_versions(archive, selected),
                                                completed=completed, progress=window_progress)
         # Read mutable official facts LAST, then source/archive/lineage. No stale preflight PASS.
         result = publisher_writer_recheck(root, selected, preflight, archive, token=credentials["api_token"])

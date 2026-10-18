@@ -13,8 +13,12 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import tarfile
+import tempfile
 import textwrap
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -48,10 +52,12 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
         self.context = http_fixtures.publisher_context()
         self.token = "synthetic_EXPLICIT_read_token"
         self.package_token = "synthetic_PACKAGES_read_token"
+        self.audit_token = "synthetic_METADATA_AUDIT_token"
         self.credentials = {"KIRA_PUBLICATION_API_READ_TOKEN": self.token,
                             "KIRA_MAVEN_READ_USERNAME": "synthetic-reader", "KIRA_MAVEN_READ_TOKEN": self.package_token,
                             "KIRA_MAVEN_WRITE_USERNAME": "synthetic-owner", "KIRA_MAVEN_WRITE_TOKEN": "synthetic_WRITE_token"}
         self.window = {"control": {"fixture": "not-live-authority"}, "registry": {"fixture": "not-live-registry"}}
+        self.audit_read = self.patch(workflow, "audit_deleted", return_value={"synthetic": "not-real-audit"})
         self.window_read = self.patch(workflow.intake, "observe_release_window", side_effect=self.window_phase)
         protection = self.selection["protection"]
         self.trusted = {"publisher_ref": self.selection["publisher"]["ref"],
@@ -67,8 +73,10 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
         self.fetched_tip, self.local_tip = "e" * 40, ""
         policy.git.side_effect = self.repository_git
 
-    def window_phase(self, selected, *, api_token, package_token, before=None):
+    def window_phase(self, selected, *, api_token, package_token, deleted_observer, before=None):
         self.assertEqual((selected, api_token, package_token), (self.selection, self.token, self.package_token))
+        self.assertEqual(deleted_observer(), {"synthetic": "not-real-audit"})
+        self.audit_read.assert_called_with(self.selection, self.audit_token)
         self.assertGreater(self.native.call_count, 0)
         if before is not None:
             self.assertEqual(before, self.window)
@@ -117,7 +125,7 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
 
     def before(self):
         runtime, selection_hash = self.job("preflight")
-        output = workflow.preflight(runtime, selection_hash, token=self.token, package_token=self.package_token)
+        output = workflow.preflight(runtime, selection_hash, token=self.token, package_token=self.package_token, audit_token=self.audit_token)
         data = (runtime.root / "comparison.json").read_bytes()
         self.assert_cleaned()
         workflow.cleanup(runtime)
@@ -154,7 +162,7 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
 
     def test_preflight_real_intake_precedes_environment_output_and_binds_private_record(self):
         runtime, selection_hash = self.job("preflight")
-        output = workflow.preflight(runtime, selection_hash, token=self.token, package_token=self.package_token)
+        output = workflow.preflight(runtime, selection_hash, token=self.token, package_token=self.package_token, audit_token=self.audit_token)
         data = (runtime.root / "comparison.json").read_bytes()
         self.assertEqual(output, {"record_sha256": policy.digest(data),
                                   "environment": self.trusted["environment"]["name"],
@@ -195,9 +203,11 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
             self.events.append("tooling")
             return env
 
-        def native(job, env, command, credentials):
+        def native(job, env, command, credentials, *, selected, audit_token):
             self.assertEqual(credentials, self.credentials)
+            self.assertEqual((selected, audit_token), (self.selection, self.audit_token))
             self.assertTrue(set(env).isdisjoint(credentials))
+            self.assertNotIn(self.audit_token, repr(env) + repr(credentials) + repr(command))
             self.assertTrue((self.checkout / "build/publication-bytes/input/seal.sha256").is_file())
             workflow.write_private(self.checkout / "build/publication-bytes/remote-readback.json", workflow.encoded(self.native_result(record_hash)))
             return {"exit_code": 0, "seconds": 0, "output_bytes": 0}
@@ -207,7 +217,8 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                 mock.patch.object(workflow, "tooling", side_effect=tooling), \
                 mock.patch.object(workflow.owned_helpers(), "profile"), \
                 mock.patch.object(workflow, "run_native", side_effect=native) as run:
-            self.assertEqual(workflow.recheck(runtime, selection_hash, record_hash, token=self.token, package_token=self.package_token),
+            self.assertEqual(workflow.recheck(runtime, selection_hash, record_hash, token=self.token,
+                                             package_token=self.package_token, audit_token=self.audit_token),
                              {"result": "complete-native-remote-readback"})
         command = run.call_args.args[2]
         self.assertEqual(command[:8], [str(self.checkout / "gradlew"), "--offline", "--no-daemon", "--no-parallel",
@@ -244,7 +255,8 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                     mock.patch.object(workflow, "tooling", return_value={}) as tooling, \
                     mock.patch.object(workflow, "stage_raw") as stage, mock.patch.object(workflow, "run_native") as native:
                 with self.subTest(late=late), self.assertRaises(policy.Refusal):
-                    workflow.recheck(runtime, selection_hash, record_hash, token=self.token, package_token=self.package_token)
+                    workflow.recheck(runtime, selection_hash, record_hash, token=self.token,
+                                      package_token=self.package_token, audit_token=self.audit_token)
                 self.assertEqual(tooling.call_count, int(late))
                 self.assertEqual(window.call_count, 2 if late else 1)
                 self.assertTrue(all(call.kwargs["before"] == self.window for call in window.call_args_list))
@@ -287,16 +299,20 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
             user.assert_not_called()
 
     def test_native_failure_redacts_split_secrets_and_stops_only_owned_group_and_home(self):
+        temporary = tempfile.TemporaryDirectory(prefix="kira-audit-", dir=Path("/tmp").resolve(strict=True))
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / ("kira-publisher-" + self.context["GITHUB_RUN_ID"] + "-1")
         authorization = base64.b64encode(b"synthetic-owner:synthetic_WRITE_token")
         for timeout in (False, True):
-            runtime, _ = self.job("recheck", "native-timeout" if timeout else "native-failure")
+            runtime, _ = self.job("recheck", root)
             env = workflow.runtime_environment(runtime, {"JAVA_HOME": "/fixture/java", "GITHUB_ENV": "/fixture/runner-env",
                 "GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GH_TOKEN": "ambient-forbidden"})
             process = mock.Mock(pid=4321, returncode=1)
             process.poll.return_value = 1
             live = [True]
             chunks = [b"synthetic_EXPLI", b"CIT_read_token synthetic_PACKAGES_read_token ",
-                      b"synthetic_WRITE_token " + authorization + b" https://storage.invalid/x?signature=private\n", b""]
+                      b"synthetic_WRITE_token " + self.audit_token.encode() + b" " + authorization
+                      + b" https://storage.invalid/x?signature=private\n", b""]
             with mock.patch.object(workflow.subprocess, "Popen", return_value=process) as launch, \
                     mock.patch.object(workflow.selectors, "DefaultSelector") as factory, \
                     mock.patch.object(workflow.os, "read", side_effect=chunks), \
@@ -305,14 +321,18 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                     mock.patch.object(workflow.owned_helpers(), "stop_owned") as stop:
                 selector = factory.return_value.__enter__.return_value
                 selector.get_map.side_effect = lambda: {17: True} if live else {}
-                selector.select.return_value = [(SimpleNamespace(fd=17), workflow.selectors.EVENT_READ)]
+                selector.select.return_value = [(SimpleNamespace(fd=17, fileobj=process.stdout), workflow.selectors.EVENT_READ)]
                 selector.unregister.side_effect = lambda _: live.clear()
                 with self.subTest(timeout=timeout), self.assertRaises(policy.Refusal):
-                    workflow.run_native(runtime, env, workflow.guarded_command(runtime, self.selection, self.metadata, "a" * 64), self.credentials)
+                    workflow.run_native(runtime, env, workflow.guarded_command(runtime, self.selection, self.metadata, "a" * 64),
+                                         self.credentials, selected=self.selection, audit_token=self.audit_token)
                 child = launch.call_args.kwargs["env"]
                 self.assertTrue(launch.call_args.kwargs["start_new_session"])
                 self.assertNotIn("GH_TOKEN", child)
                 self.assertNotIn("GITHUB_ENV", child)
+                self.assertNotIn("KIRA_PACKAGES_METADATA_AUDIT_TOKEN", child)
+                self.assertNotIn(self.audit_token, repr(launch.call_args))
+                self.assertEqual(launch.call_args.kwargs["stdin"], workflow.subprocess.DEVNULL)
                 self.assertEqual({key: child[key] for key in self.credentials}, self.credentials)
                 self.assertEqual(child["GRADLE_USER_HOME"], str(runtime.root / "gradle"))
                 self.assertEqual(kill.call_args_list, [mock.call(4321, signal.SIGTERM), mock.call(4321, signal.SIGKILL)])
@@ -320,12 +340,14 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                 self.assertTrue(set(stop.call_args.args[1]).isdisjoint(self.credentials))
                 process.stdout.close.assert_called_once()
             log = (runtime.root / "diagnostics/native.log").read_bytes()
-            for forbidden in (self.token.encode(), self.package_token.encode(), b"synthetic_WRITE_token", authorization, b"signature=private"):
+            for forbidden in (self.token.encode(), self.package_token.encode(), self.audit_token.encode(),
+                              b"synthetic_WRITE_token", authorization, b"signature=private"):
                 self.assertNotIn(forbidden, log)
             if not timeout:
                 self.assertIn(b"[redacted]", log)
                 self.assertIn(b"[redacted-query-url]", log)
             self.assertFalse((runtime.root / "diagnostics/native-result.json").exists())
+            self.assertFalse((runtime.root / workflow.intake.AUDIT_SOCKET).exists())
             workflow.cleanup(runtime)
 
     def test_disposal_requires_worker_barrier_and_retains_unrelated_paths(self):
@@ -370,7 +392,8 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
             try:
                 with self.subTest(case=case), self.assertRaises(policy.Refusal):
                     workflow.recheck(attempted, "0" * 64 if case == "selection" else selected_hash,
-                                     "0" * 64 if case == "record" else record_hash, token=self.token)
+                                     "0" * 64 if case == "record" else record_hash, token=self.token,
+                                     package_token=self.package_token, audit_token=self.audit_token)
                 self.assertEqual(self.native.call_count, 1)
                 self.assertEqual(self.requests, [])
                 self.assertFalse((self.checkout / "build").exists())
@@ -386,7 +409,8 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
         runtime, selected_hash = self.job("recheck")
         self.handoff(runtime, data)
         with self.assertRaisesRegex(policy.Refusal, "^Publisher recheck refused$"):
-            workflow.recheck(runtime, selected_hash, record_hash, token=self.token)
+            workflow.recheck(runtime, selected_hash, record_hash, token=self.token,
+                             package_token=self.package_token, audit_token=self.audit_token)
         self.assertEqual(self.native.call_count, 2)
         self.assertGreater(len(self.requests), 4)
         self.assertFalse((self.checkout / "build").exists())
@@ -430,6 +454,167 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
         workflow.cleanup(runtime)
 
 
+class MetadataAuditCustodyTests(unittest.TestCase):
+    def setUp(self):
+        # Darwin's runner TMPDIR is too long for the unchanged production socket bound.
+        temporary = tempfile.TemporaryDirectory(prefix="kira-audit-", dir=Path("/tmp").resolve(strict=True))
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        invocation, protection = http_fixtures.publisher_selection()
+        producer = fixtures.expected()
+        self.selected = {"producer": producer, "publisher": invocation, "protection": protection,
+                         "app_parity_ref": "synthetic-app", "backend_parity_ref": "synthetic-backend",
+                         "release_window": intake_fixtures.selected_window(producer, invocation, protection)}
+        root = self.root / ("kira-publisher-" + str(invocation["run_id"]) + "-1")
+        root.mkdir(mode=0o700)
+        self.runtime = workflow.Runtime(self.root / "control", self.root / "producer", root,
+                                        http_fixtures.publisher_context(), "recheck")
+        workflow.write_private(root / "owner.json", workflow.encoded(self.runtime.owner()))
+        self.token = "synthetic_separate_METADATA_AUDIT"
+        self.observation = {"packages": {identity: value | {"deleted": []}
+                                         for identity, value in self.selected["release_window"]["packages"].items()},
+                            "grants": {"profile": reader.AUDIT_PROFILE, "oauth_scopes": ["delete:packages", "read:packages"]}}
+        self.patch = mock.patch.object(workflow, "audit_deleted", return_value=self.observation)
+        self.get = self.patch.start()
+        self.addCleanup(self.patch.stop)
+        timeout = mock.patch.object(workflow.intake, "AUDIT_SECONDS", 2)
+        timeout.start()
+        self.addCleanup(timeout.stop)
+
+    def audit(self):
+        return workflow.MetadataAudit(self.runtime, self.selected, self.token, time.monotonic() + 10)
+
+    def client(self, finally_close=None):
+        results = []
+
+        def run():
+            try:
+                results.append(workflow.intake.controller_deleted_versions(self.runtime.root / policy.ARCHIVE, self.selected))
+            except Exception as error:
+                results.append(error)
+            finally:
+                if finally_close is not None:
+                    os.close(finally_close)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread, results
+
+    def joined(self, thread):
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+
+    def test_real_owned_socket_has_sixteen_fresh_fixed_observations_then_refuses_and_disappears(self):
+        with self.audit() as audit:
+            self.assertEqual(audit.path.stat().st_mode & 0o777, 0o600)
+            for _ in range(16):
+                thread, results = self.client()
+                try:
+                    audit.serve_once()
+                finally:
+                    self.joined(thread)
+                self.assertEqual(results, [self.observation])
+            self.assertEqual(self.get.call_count, 16)
+            self.get.assert_called_with(self.selected, self.token)
+            with self.assertRaises(policy.Refusal):
+                audit.serve_once()
+            self.assertNotIn(self.token, workflow.encoded(results).decode())
+        self.assertEqual(audit.listener.fileno(), -1)
+        self.assertFalse(audit.path.exists())
+        self.assertIsNone(audit.token)
+        self.assertEqual([p.name for p in self.runtime.root.iterdir()], ["owner.json"])
+
+    def test_fixed_operation_binding_size_and_provider_failure_never_return_credentials(self):
+        binding = workflow.intake.metadata_audit_binding(self.selected) | {"nonce": "a" * 32}
+        cases = [workflow.encoded(binding | change) for change in
+                 ({"operation": "active-versions"}, {"selection_sha256": "0" * 64},
+                  {"nonce": "bad"}, {"url": "https://untrusted.invalid"}, {"token": self.token})]
+        cases.append(b"x" * (workflow.intake.AUDIT_REQUEST_LIMIT + 1))
+        with self.audit() as audit:
+            for request in cases:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(2)
+                    client.connect(str(audit.path))
+                    client.sendall(request)
+                    client.shutdown(socket.SHUT_WR)
+                    with self.assertRaises((policy.Refusal, ValueError)):
+                        audit.serve_once()
+                    self.assertEqual(client.recv(1), b"")
+            self.get.assert_not_called()
+        with self.assertRaises(OSError):
+            with self.audit() as audit:
+                self.get.side_effect = OSError(self.token)
+                thread, results = self.client()
+                try:
+                    audit.serve_once()
+                finally:
+                    self.joined(thread)
+                self.fail("Provider error was swallowed")
+        self.assertFalse(audit.path.exists())
+        self.assertEqual(len(results), 1)
+        self.assertIsInstance(results[0], Exception)
+        self.assertNotIn(self.token, str(results[0]))
+
+    def test_client_rejects_nonce_substitution_and_missing_members_and_reused_socket(self):
+        for change in ("nonce", "membership"):
+            with self.audit() as audit:
+                thread, results = self.client()
+                try:
+                    with audit.listener.accept()[0] as connection:
+                        request = workflow.intake.audit_receive(connection, workflow.intake.AUDIT_REQUEST_LIMIT, 2)
+                        self.assertEqual(set(request), {"operation", "selection_sha256", "nonce"})
+                        self.assertNotIn(self.token, repr(request))
+                        response = request | {"observation": self.observation}
+                        if change == "nonce":
+                            response["nonce"] = "0" * 32
+                        else:
+                            response["observation"] = self.observation | {"packages": {}}
+                        connection.sendall(workflow.encoded(response))
+                finally:
+                    self.joined(thread)
+                self.assertEqual(len(results), 1)
+                self.assertIsInstance(results[0], policy.Refusal)
+        path = self.runtime.root / workflow.intake.AUDIT_SOCKET
+        path.write_text("unrelated")
+        with self.assertRaises(policy.Refusal):
+            with self.audit():
+                self.fail("Reused socket path admitted")
+        self.assertEqual(path.read_text(), "unrelated")
+
+    def test_existing_stdout_selector_services_audit_without_a_production_thread_or_child(self):
+        read, write = os.pipe()
+        with os.fdopen(read, "rb") as stdout, self.audit() as audit:
+            process = SimpleNamespace(stdout=stdout, poll=lambda: 0)
+            thread, results = self.client(finally_close=write)
+            credentials = {"KIRA_PUBLICATION_API_READ_TOKEN": "synthetic_API", "KIRA_MAVEN_READ_USERNAME": "reader",
+                           "KIRA_MAVEN_READ_TOKEN": "synthetic_PAYLOAD", "KIRA_MAVEN_WRITE_USERNAME": "writer",
+                           "KIRA_MAVEN_WRITE_TOKEN": "synthetic_WRITE"}
+            try:
+                count = workflow.native_output(process, io.BytesIO(), credentials, time.monotonic() + 5, audit)
+            finally:
+                self.joined(thread)
+            self.assertEqual((count, audit.calls, results), (0, 1, [self.observation]))
+        self.assertFalse(audit.path.exists())
+
+    def test_missing_or_aliased_audit_custody_refuses_before_any_child_or_http(self):
+        for value in (None, "", "bad token", "API", "PAYLOAD", "WRITE"):
+            with self.subTest(value=value), self.assertRaises(policy.Refusal):
+                workflow.audit_credentials(value, api_token="API", package_token="PAYLOAD", write_token="WRITE")
+        workflow.audit_credentials(self.token, api_token="API", package_token="PAYLOAD", write_token="WRITE")
+        with mock.patch.object(workflow.subprocess, "Popen") as child, mock.patch.object(receipts, "_get_json") as http:
+            preflight = workflow.Runtime(self.runtime.control, self.runtime.producer, self.runtime.root,
+                                          self.runtime.context, "preflight")
+            with self.assertRaisesRegex(policy.Refusal, "Separate explicit metadata-audit custody required"):
+                workflow.preflight(preflight, "0" * 64, token="API", package_token="PAYLOAD")
+            with self.assertRaisesRegex(policy.Refusal, "Separate explicit metadata-audit custody required"):
+                workflow.recheck(self.runtime, "0" * 64, "0" * 64, token="API", package_token="PAYLOAD", audit_token="PAYLOAD")
+            with self.assertRaisesRegex(policy.Refusal, "Native credential projection refused"):
+                workflow.run_native(self.runtime, {}, [], {"KIRA_PACKAGES_METADATA_AUDIT_TOKEN": self.token},
+                                     selected=self.selected, audit_token=self.token)
+            child.assert_not_called()
+            http.assert_not_called()
+
+
 class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
     def test_cli_strips_child_credentials_and_refuses_unconfigured_or_write_custody(self):
         workspace, temporary = self.root / "workspace", self.root / "runner-temp"
@@ -456,6 +641,9 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
             selected.assert_called_once()
             selected.reset_mock()
             with mock.patch.dict(os.environ, env | {"KIRA_MAVEN_WRITE_TOKEN": "synthetic_WRITE_secret"}, clear=True), redirect_stderr(errors):
+                self.assertEqual(workflow.main(["prepare-preflight"]), 1)
+            selected.assert_not_called()
+            with mock.patch.dict(os.environ, env | {"KIRA_PACKAGES_METADATA_AUDIT_TOKEN": "synthetic_AUDIT_secret"}, clear=True), redirect_stderr(errors):
                 self.assertEqual(workflow.main(["prepare-preflight"]), 1)
             selected.assert_not_called()
         self.assertNotIn("secret", errors.getvalue().lower())
@@ -507,7 +695,7 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         read_probe, audit_and_preflight = before.split("  approval-and-metadata-audit:", 1)
         audit, preflight = audit_and_preflight.split("  preflight:", 1)
         self.assertNotIn("packages: write", read_probe + preflight)
-        self.assertEqual(audit.count("packages: write"), 1)
+        self.assertNotIn("packages: write", audit)
         self.assertIn("${{ inputs.metadata_audit_check && !inputs.access_check && github.event_name == 'workflow_dispatch'", audit)
         for guard in ("github.repository == 'kira-manga/kira-source-engine'", "github.repository_id == '1310736214'",
                       "github.ref == 'refs/heads/remediation/production-readiness-2026-09-04'", "github.run_attempt == 1",
@@ -517,7 +705,8 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertIn("environment: source-publication", audit)
         self.assertIn("runs-on: ubuntu-24.04", audit)
         self.assertIn("timeout-minutes: 5", audit)
-        self.assertEqual(audit.count("github.token"), 1)
+        self.assertNotIn("github.token", audit)
+        self.assertEqual(audit.count("secrets."), 2)
         self.assertEqual(audit.count("uses:"), 1)
         self.assertIn("actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5", audit)
         self.assertIn("persist-credentials: false", audit)
@@ -525,15 +714,27 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertEqual(re.findall(r"^            /(.+)$", audit, re.M),
                          [".github/scripts/publication_policy.py", ".github/scripts/github_publication_receipts.py",
                           ".github/scripts/remote_maven_readback.py"])
-        self.assertLess(audit.index("os.environ.pop('KIRA_METADATA_AUDIT_JOB_TOKEN')"),
-                        audit.index("import github_publication_receipts"))
-        for forbidden in ("secrets.", "inputs.selection", "outputs:", "GITHUB_OUTPUT", "GITHUB_ENV", "needs:",
-                          "upload-artifact", "gradlew", "publisher_workflow.py", "bypass_branch", "subprocess", "package_read=True"):
+        for key in ("KIRA_PACKAGES_READ_TOKEN", "KIRA_PACKAGES_METADATA_AUDIT_TOKEN"):
+            self.assertLess(audit.index("os.environ.pop('" + key + "')"),
+                            audit.index("import github_publication_receipts"))
+            self.assertIn(key + ": ${{ secrets." + key + " }}", audit)
+        self.assertIn("receipts._get_deleted_versions(item['name'], audit_token)", audit)
+        self.assertIn("package_token, collection=True, package_read=True", audit)
+        for forbidden in ("inputs.selection", "outputs:", "GITHUB_OUTPUT", "GITHUB_ENV", "needs:",
+                          "upload-artifact", "gradlew", "publisher_workflow.py", "bypass_branch", "subprocess", "'/user'"):
             self.assertNotIn(forbidden, audit)
         self.assertIn("if: ${{ always() }}", audit)
         self.assertIn("root.is_symlink()", audit)
         self.assertIn("shutil.rmtree(root)", audit)
-        self.assertNotIn("KIRA_METADATA_AUDIT_JOB_TOKEN", read_probe + preflight + protected)
+        self.assertNotIn("KIRA_METADATA_AUDIT_JOB_TOKEN", source)
+        self.assertIn("environment: source-publication", preflight)
+        audit_secret = "KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}"
+        self.assertEqual(audit.count(audit_secret), 1)
+        self.assertEqual(preflight.count(audit_secret), 1)
+        self.assertEqual(protected.count(audit_secret), 1)
+        self.assertNotIn("KIRA_PACKAGES_METADATA_AUDIT_TOKEN", read_probe)
+        self.assertNotIn("KIRA_PACKAGES_METADATA_AUDIT_TOKEN", preflight.split("Real fresh native intake", 1)[0])
+        self.assertNotIn("KIRA_PACKAGES_METADATA_AUDIT_TOKEN", protected.split("publisher_workflow.py recheck", 1)[1])
         self.assertNotIn("KIRA_MAVEN_WRITE_", before)
         self.assertEqual(protected.count("packages: write"), 1)
         self.assertEqual(protected.count("KIRA_MAVEN_WRITE_USERNAME: ${{ github.actor }}"), 1)
@@ -546,7 +747,7 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertEqual(source.count("fetch-depth: 0"), 2)
         self.assertIn("artifact-ids: ${{ needs.preflight.outputs.record_artifact_id }}", source)
         self.assertEqual(source.count("KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}"), 5)
-        self.assertEqual(source.count("KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}"), 3)
+        self.assertEqual(source.count("KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}"), 4)
         self.assertNotIn("KIRA_PUBLICATION_API_READ_TOKEN: ${{ github.token }}", source)
         self.assertNotIn("KIRA_PACKAGES_READ_TOKEN: ${{ github.token }}", source)
         self.assertIn("cleanup-preflight", source)
@@ -558,6 +759,13 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         ci = (Path(__file__).resolve().parents[1] / "workflows/ci.yml").read_text()
         self.assertIn("      - main", ci.split("  push:", 1)[0])
         self.assertNotIn("      - main", ci.split("  push:", 1)[1].split("permissions:", 1)[0])
+        ipc_step = ci.split("      - name: Test controller metadata custody on the actual Darwin host", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 2", ipc_step)
+        self.assertIn("python3 -B -m unittest -v", ipc_step)
+        self.assertIn("test_publisher_workflow.MetadataAuditCustodyTests", ipc_step)
+        self.assertIn('tee "$KIRA_CI_ROOT/diagnostics/metadata-audit-ipc.log"', ipc_step)
+        self.assertNotIn("secrets.", ipc_step)
+        self.assertLess(ci.index("Test controller metadata custody"), ci.index("Prepare authenticated source-built libffi"))
         for pin in ("34e114876b0b11c390a56381ad16ebd13914f8d5", "d3f86a106a0bac45b974a628896c90dbdf5c8093",
                     "ea165f8d65b6e75b540449e92b4886f43607fa02", "c1e323688fd81a25caa38c78aa6df2d33d3e20d9"):
             self.assertIn(pin, source)
@@ -657,7 +865,7 @@ class MetadataAuditDiagnosticTests(unittest.TestCase):
                      "repository": {"id": 1310736214, "full_name": "kira-manga/kira-source-engine"}}
                     for i, name in enumerate(names)]
         for mode in ("pass", "deleted_refusal", "inventory_refusal", "wrong_name", "wrong_repository",
-                     "duplicate_id", "bad_version", "missing_token"):
+                     "duplicate_id", "bad_version", "grant_change", "missing_audit", "missing_payload", "aliased_tokens"):
             with self.subTest(mode=mode):
                 calls = []
                 selected = copy.deepcopy(packages)
@@ -669,45 +877,67 @@ class MetadataAuditDiagnosticTests(unittest.TestCase):
                     selected[0]["id"] = selected[1]["id"]
 
                 def observe(path, token, *, collection=False, package_read=False):
-                    # No caller-selected host/query/method, payload grant or credential fallback.
-                    self.assertEqual((token, collection, package_read), ("synthetic_PRIVILEGED", True, False))
+                    self.assertEqual((token, collection, package_read), ("synthetic_PAYLOAD", True, True))
+                    self.assertEqual(path, "/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1")
                     calls.append(path)
-                    if path == "/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1":
-                        if mode == "inventory_refusal":
-                            raise receipts.ReceiptObservationRefusal(403, "response_validation")
-                        values = selected
-                    else:
-                        self.assertIn(path, {"/orgs/kira-manga/packages/maven/" + name +
-                            "/versions?state=" + state + "&per_page=100&page=1"
-                            for name in names for state in ("active", "deleted")})
-                        if mode == "deleted_refusal" and "state=deleted" in path:
-                            raise receipts.ReceiptObservationRefusal(403, "response_validation")
-                        values = [{"id": 101, "name": "0.1.0"}]
-                        if mode == "bad_version" and len(calls) == 2:
-                            values = [{"id": 101, "name": "untrusted/synthetic_PRIVILEGED"}]
-                    return {"value": values, "status": 200, "oauth_scopes": None}
+                    if mode == "inventory_refusal":
+                        raise receipts.ReceiptObservationRefusal(403, "response_validation")
+                    return {"value": selected, "status": 200, "oauth_scopes": ["read:packages"]}
+
+                def deleted(name, token):
+                    self.assertEqual(token, "synthetic_PRIVILEGED")
+                    self.assertIn(name, names)
+                    calls.append(receipts.DELETED_PACKAGE_PATHS[name])
+                    if mode == "deleted_refusal":
+                        raise receipts.ReceiptObservationRefusal(403, "response_validation")
+                    values = [{"id": 101, "name": "0.1.0"}]
+                    if mode == "bad_version" and len(calls) == 2:
+                        values = [{"id": 101, "name": "untrusted/synthetic_PRIVILEGED"}]
+                    scopes = ["delete:packages", "read:packages"]
+                    if mode == "grant_change" and len(calls) == 3:
+                        scopes.append("repo")
+                    return {"items": values, "oauth_scopes": scopes}
 
                 output = io.StringIO()
-                scope = {"json": json, "reader": reader, "token": "" if mode == "missing_token" else "synthetic_PRIVILEGED",
-                         "receipts": SimpleNamespace(observe_json=observe,
+                audit_token = "" if mode == "missing_audit" else "synthetic_PRIVILEGED"
+                if mode == "aliased_tokens":
+                    audit_token = "synthetic_PAYLOAD"
+                scope = {"json": json, "reader": reader, "audit_token": audit_token,
+                         "package_token": "" if mode == "missing_payload" else "synthetic_PAYLOAD",
+                         "receipts": SimpleNamespace(observe_json=observe, _get_deleted_versions=deleted,
+                             _validate_read_token=receipts._validate_read_token,
                              ReceiptObservationRefusal=receipts.ReceiptObservationRefusal)}
                 with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
                     exec(program, scope)
                 self.assertEqual(stopped.exception.code, int(mode != "pass"))
                 rows = [json.loads(line.removeprefix("KIRA_METADATA_AUDIT ")) for line in output.getvalue().splitlines()]
-                complete = mode in ("pass", "deleted_refusal", "bad_version")
-                self.assertEqual(len(calls), 31 if complete else (0 if mode == "missing_token" else 1))
-                self.assertEqual(len(rows), 31 if complete else 1)
+                complete = mode in ("pass", "deleted_refusal", "bad_version", "grant_change")
+                invalid_custody = mode in ("missing_audit", "missing_payload", "aliased_tokens")
+                self.assertEqual(len(calls), 16 if complete else (0 if invalid_custody else 1))
+                self.assertEqual(len(rows), 16 if complete else 1)
                 self.assertEqual(len(calls), len(set(calls)))
                 self.assertEqual(sum(row["result"] == "FAIL" for row in rows),
                                  0 if mode == "pass" else 15 if mode == "deleted_refusal" else 1)
-                self.assertTrue(all(row["method"] == "GET" and row["credential_channel"] == "short_lived_metadata_audit"
-                                    and row["mutation_capable_credential"] and row["diagnostic_only"]
+                self.assertTrue(all(row["method"] == "GET" and row["diagnostic_only"]
                                     and row["custody_approval"] is False for row in rows))
+                self.assertEqual(rows[0]["credential_channel"], "payload_read")
+                self.assertFalse(rows[0]["mutation_capable_credential"])
                 if complete:
+                    self.assertEqual(rows[0]["oauth_scopes"], ["read:packages"])
                     self.assertEqual({(row["package"], row["state"]) for row in rows[1:]},
-                                     {(name, state) for name in names for state in ("active", "deleted")})
+                                     {(name, "deleted") for name in names})
+                for row in rows[1:]:
+                    self.assertEqual(row["credential_channel"], "dedicated_classic_metadata_audit")
+                    self.assertTrue(row["mutation_capable_credential"])
+                    if row["result"] == "PASS":
+                        self.assertEqual(row["profile"], reader.AUDIT_PROFILE)
+                        self.assertEqual(row["oauth_scopes"], ["delete:packages", "read:packages"])
+                for row in rows:
+                    if row["result"] == "FAIL":
+                        self.assertIn((row["http_status"], row["stage"]),
+                                      ((None, "token_validation"), (403, "response_validation"), (200, "response_validation")))
                 self.assertNotIn("synthetic_PRIVILEGED", output.getvalue())
+                self.assertNotIn("synthetic_PAYLOAD", output.getvalue())
                 self.assertNotIn("untrusted", output.getvalue())
 
 

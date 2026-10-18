@@ -53,8 +53,9 @@ the existing SDK's API37 metadata and `android.jar`, accepting real `android-37`
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
 publication components and Kotlin/API levels are unchanged. The committed
-`VERSION_NAME=0.2.0` is a **prospective engineering candidate, not a reserved or published
-version**; no tag or consumer pin changes with it. CI's candidate/noncandidate distinction
+`VERSION_NAME=0.2.1` is a **prospective engineering candidate, not a reserved or published
+version**; no tag or consumer pin changes with it. Historical `v0.2.0` must not be moved
+to admit changed helper bytes. CI's candidate/noncandidate distinction
 is described below.
 
 ## Remote publication: current-source containment only
@@ -198,7 +199,7 @@ internal presence API (never credential values); no internal/custom publisher is
 
 ## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed prospective version is `0.2.0`, not reserved or published.** PRs remain
+**The committed prospective version is `0.2.1`, not reserved or published.** PRs remain
 check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
 produced** and skip export, candidate artifact upload and attestation. Diagnostics are
 still retained. A green PR is not a producer receipt. An exact eligible integration push
@@ -593,7 +594,7 @@ is covered by `test_github_branch_bypass_proof.BranchBypassProofTests` and the c
 
 `-PkiraPublicationMode=promote-remote` configures the **same fifteen original native writers**
 and task identities at the literal `https://maven.pkg.github.com/kira-manga/kira-source-engine`.
-Only `publish.yml`'s post-approval native publisher uploads packages. Its read-only
+Only `publish.yml`'s post-approval native publisher uploads packages. Its non-uploading
 preflight/access-check and the isolated metadata probe below cannot invoke that publisher. The immediate
 pre-action guard requires fresh window/policy/package observations as well as original source, graph, action and native-byte
 checks. Ordinary `publish` containment and the historical `release_holds()` comparison helper
@@ -632,6 +633,39 @@ global/system configuration and inherited credentials are excluded. The copied p
 the original checkout; the fixed local Git lookup disables hooks and filesystem monitoring.
 No write token reaches that helper, its Git subprocesses or its read-only HTTP adapters.
 These names select custody channels, not operational credential authority or proven token scopes.
+
+The controller separately requires `KIRA_PACKAGES_METADATA_AUDIT_TOKEN`, provisioned as
+an **environment secret in `source-publication`**, not an alias of the API, payload or native
+writer token. Both preflight and recheck sit behind that actual environment boundary;
+only their controller steps receive this credential. The selected profile is a dedicated
+classic token whose real response scopes include `read:packages` and `delete:packages`,
+exclude `write:packages`, and remain identical across observations. No `repo` scope is
+required by this validator; any additional reported scopes are retained honestly. Missing
+scope metadata or a different token class refuses, with no fallback to a job/write token.
+This credential is deletion-capable even though our adapter exposes only GET and no deletion
+is authorized. It never enters Gradle/native/helper environment, stdin, argv, files or logs.
+
+Classic read-only custody still performs package inventory, all fifteen active-version GETs
+and every Maven payload/index read, with its unchanged no-write/no-delete scope validator.
+The controller alone performs all fifteen fixed deleted-version GETs. Each registry receipt
+retains `oauth_scopes` for the payload channel and separate `deleted_audit` profile/scopes;
+both are validated and compared with the original window and previous writer boundary.
+An injected observation is not an approval, and a missing audit never means an empty list.
+
+During native execution the existing controller stdout selector also services one fixed
+Unix-socket operation under the owned0700 publisher root (socket0600). The request contains
+only the selection hash and a fresh nonce, not a credential, URL or package selector. The
+copied native helper derives that socket from its already admitted archive location, checks
+owner/type/mode and response binding, and validates the complete fifteen-package result.
+There are at most sixteen native observations, with512-byte requests,512KiB responses and
+bounded socket/API/native deadlines. No daemon/thread or new process is introduced; every
+outcome closes/unlinks the owned socket and follows the existing native worker-stop path.
+This is a same-UID private runner boundary, not protection from a compromised host. Existing
+HTTPS DNS resolution still has no separate hard deadline. New helper bytes require a new
+genuine producer/seal and actual platform qualification, not overlaying an old cohort.
+The existing Darwin CI runs the focused IPC class before bootstrap, retaining its log;
+its disposable test-only roots use resolved `/tmp` so the100-byte production socket bound
+is not weakened to accommodate a long runner TMPDIR. This is not live credential proof.
 
 At each writer the helper rereads source/archive, fresh official producer/publisher/protection
 facts and local lineage, comparing the original preflight. It intentionally uses generated-root-
@@ -673,28 +707,34 @@ PYTHONPATH=.github/scripts python3 -B -m unittest -v \
   test_remote_maven_readback.RemoteMavenReadbackTests
 ```
 
-### Isolated mutation-capable metadata access probe
+### Isolated classic metadata-audit access check
 
 The owner authorized a separate metadata-audit capability on 2026-10-18: GitHub's deleted-version
 GET requires deletion authority, which the independent classic payload token must not receive.
-`publish.yml`'s `metadata_audit_check=true` mode uses a **mutation/deletion-capable** short-lived,
-repository-scoped `GITHUB_TOKEN` (`packages:write`) solely in a separate Ubuntu job behind the
-same named `source-publication` approval (initiator approval allowed, admin bypass disabled).
-Its effective access to deleted versions must be proved by the real API, not assumed from YAML.
+`publish.yml`'s `metadata_audit_check=true` mode validates the production adapter using the
+explicit **deletion-capable classic** `KIRA_PACKAGES_METADATA_AUDIT_TOKEN` environment secret,
+distinct from the existing classic payload-read token. Its separate Ubuntu job sits behind
+the same named `source-publication` approval (initiator approval allowed, admin bypass disabled).
+The job token has no package-write permission and is never a credential fallback. The real
+audit response must prove `read:packages` plus `delete:packages`, without `write:packages`;
+effective access and token grants are not assumed from the secret's name or YAML.
 It must not run concurrently with a publication window; shared workflow concurrency serializes
 this workflow, but does not exclude other/out-of-band writers.
 
 The probe is mutually exclusive with `access_check` and publication. It checks out only three
 reviewed read helpers at the exact protected workflow SHA without persisting credentials, and
-performs at most 31 fixed-host GETs: bounded package inventory and active/deleted versions for
-exactly the fifteen Engine package names. No producer checkout/build, custom action, mutation
-request, payload credential, approval receipt, output or artifact feeds the publisher. Failures
+performs at most16 fixed-host GETs: the independent payload token reads the bounded package
+inventory, then the separate audit token reads deleted versions for exactly the fifteen validated
+Engine package names. Both secrets are removed from the process environment before helper imports;
+no actor/account query is added. No producer checkout/build, custom action, mutation request,
+approval receipt, output or artifact feeds the publisher. Failures
 remain failures, including 403, pagination, incomplete or malformed data. Only sanitized status
 and validated package/version identities are logged; the helper checkout is always removed.
 
 This credential is **not read-only** merely because this code only calls GET. No deletion is
 authorized. The classic payload-reader no-write/no-delete scope validator stays unchanged.
-This first capability probe does not establish production metadata isolation, full continuous
-registry observations, writer exclusion, or publication eligibility. Production remains held
-until that separate custody integration and focused security review are complete; a one-time
-snapshot must not substitute for the required fresh before/after-write observations.
+This diagnostic does not establish live production metadata isolation, full continuous
+registry observations, writer exclusion, or publication eligibility. The separate controller
+route above still requires a legitimate distinct credential, security review and actual
+qualification; probe success cannot mint or substitute that credential. A one-time snapshot
+must not substitute for the required fresh before/after-write observations.

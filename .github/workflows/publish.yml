@@ -19,7 +19,7 @@ on:
         default: false
 
       metadata_audit_check:
-        description: Protected GET-only probe of mutation-capable short-lived package metadata access; cannot publish
+        description: Verify separate classic metadata-audit environment custody with fixed GETs; cannot publish
         required: false
         type: boolean
         default: false
@@ -207,14 +207,13 @@ jobs:
           github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
           github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
           github.workflow_sha == github.sha }}
-    # Owner-authorized privileged metadata probe, NOT a read-only credential or release receipt.
-    # This isolated job can mutate packages at GitHub, but its reviewed code only issues GET.
+    # Owner-authorized deletion-capable environment custody, NOT a read-only credential or release receipt.
+    # The job token has no package-write permission and is never an audit/payload fallback.
     environment: source-publication
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Check out only reviewed GET helpers without persisted credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -228,22 +227,24 @@ jobs:
             /.github/scripts/github_publication_receipts.py
             /.github/scripts/remote_maven_readback.py
 
-      - name: Probe only fixed Engine metadata GETs with the separate short-lived audit capability
+      - name: Verify the actual separate classic metadata-audit adapter without any build
         env:
-          KIRA_METADATA_AUDIT_JOB_TOKEN: ${{ github.token }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
         shell: bash
         run: |
           python3 -B -E -s - <<'PY'
           import json, os, pathlib, sys
-          token = os.environ.pop('KIRA_METADATA_AUDIT_JOB_TOKEN')
+          package_token = os.environ.pop('KIRA_PACKAGES_READ_TOKEN')
+          audit_token = os.environ.pop('KIRA_PACKAGES_METADATA_AUDIT_TOKEN')
           helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'metadata-audit/.github/scripts'
           sys.path.insert(0, str(helpers))
           import github_publication_receipts as receipts
           import remote_maven_readback as reader
           failed = []
+          audit_scopes = None
           def check(name, operation, **context):
-              record = {'check': name, 'method': 'GET', 'credential_channel': 'short_lived_metadata_audit',
-                  'mutation_capable_credential': True, 'diagnostic_only': True, 'custody_approval': False, **context}
+              record = {'check': name, 'method': 'GET', 'diagnostic_only': True, 'custody_approval': False, **context}
               try:
                   details = operation()
                   print('KIRA_METADATA_AUDIT ' + json.dumps(
@@ -255,10 +256,15 @@ jobs:
                       {**record, 'result': 'FAIL', 'http_status': getattr(error, 'status', None),
                           'stage': getattr(error, 'stage', None)}, sort_keys=True), flush=True)
           def inventory():
-              if not token:
-                  raise receipts.ReceiptObservationRefusal(None, 'token_validation')
+              try:
+                  receipts._validate_read_token(package_token)
+                  receipts._validate_read_token(audit_token)
+                  if not package_token or not audit_token or audit_token == package_token:
+                      raise ValueError('Distinct explicit custody required')
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(None, 'token_validation') from None
               response = receipts.observe_json('/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1',
-                  token, collection=True)
+                  package_token, collection=True, package_read=True)
               try:
                   items = [v for v in response['value'] if (v.get('repository') or {}).get('id') == 1310736214]
                   expected = {reader.policy.GROUP + '.' + module + suffix for module in reader.policy.MODULES
@@ -272,23 +278,27 @@ jobs:
                   packages = [{'id': v['id'], 'name': v['name']} for v in sorted(items, key=lambda v: v['name'])]
               except Exception:
                   raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
-              return {'http_status': 200, 'packages': packages}
-          def versions(item, state):
+              return {'http_status': 200, 'packages': packages, 'oauth_scopes': response['oauth_scopes']}
+          def versions(item):
+              global audit_scopes
               # Names come only from the exact trusted fifteen-name inventory above, never dispatch input.
-              response = receipts.observe_json('/orgs/kira-manga/packages/maven/' + item['name'] +
-                  '/versions?state=' + state + '&per_page=100&page=1', token, collection=True)
+              response = receipts._get_deleted_versions(item['name'], audit_token)
               try:
-                  values = reader._versions(response['value'])
+                  values = reader._versions(response['items'])
+                  if audit_scopes is not None and response['oauth_scopes'] != audit_scopes:
+                      raise ValueError('Audit grants changed')
+                  audit_scopes = response['oauth_scopes']
               except Exception:
                   raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
-              return {'http_status': 200, 'versions': values}
-          # At most31 GETs. No pagination/retries/redirects; shared transport retains its bounds.
-          metadata = check('package_inventory', inventory)
+              return {'http_status': 200, 'versions': values, 'oauth_scopes': audit_scopes, 'profile': reader.AUDIT_PROFILE}
+          # At most16 GETs. No pagination/retries/redirects; shared production adapters retain their bounds.
+          metadata = check('package_inventory', inventory,
+              credential_channel='payload_read', mutation_capable_credential=False)
           if metadata is not None:
               for item in metadata['packages']:
-                  for state in ('active', 'deleted'):
-                      check('package_versions', lambda: versions(item, state),
-                          package=item['name'], package_id=item['id'], state=state)
+                  check('deleted_versions', lambda: versions(item),
+                      package=item['name'], package_id=item['id'], state='deleted',
+                      credential_channel='dedicated_classic_metadata_audit', mutation_capable_credential=True)
           # This mode yields no artifact/output consumed by preflight or the native publisher.
           raise SystemExit(1 if failed else 0)
           PY
@@ -313,6 +323,8 @@ jobs:
           github.repository_owner == 'kira-manga' && github.run_attempt == 1 &&
           github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
           github.workflow_sha == github.sha }}
+    # The controller's separate audit credential is an environment secret, even before intake.
+    environment: source-publication
     runs-on: macos-latest
     timeout-minutes: 15
     defaults:
@@ -379,6 +391,7 @@ jobs:
           KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
           KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
           KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
         run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py preflight
 
       - name: Retain the bounded exact comparison for this run, not an approval receipt
@@ -495,6 +508,7 @@ jobs:
           KIRA_RECORD_SHA256: ${{ needs.preflight.outputs.record_sha256 }}
           KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
           KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
           KIRA_MAVEN_WRITE_USERNAME: ${{ github.actor }}
           KIRA_MAVEN_WRITE_TOKEN: ${{ github.token }}
         run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py recheck
