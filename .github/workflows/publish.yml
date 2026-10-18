@@ -37,7 +37,7 @@ jobs:
     # Fixed, owner-authorized environment. This job has no publisher outputs or write authority.
     environment: source-publication
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 5 # At most 30 classic and four diagnostic-only version reads; no retries.
     permissions:
       contents: read
       packages: read
@@ -58,28 +58,33 @@ jobs:
         env:
           KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
           KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_DIAGNOSTIC_JOB_READ_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           python3 -B -E -s - <<'PY'
           import json, os, pathlib, re, sys, urllib.parse, xml.etree.ElementTree as ET
           policy_token = os.environ.pop('KIRA_PUBLICATION_API_READ_TOKEN')
           package_token = os.environ.pop('KIRA_PACKAGES_READ_TOKEN')
+          job_token = os.environ.pop('KIRA_DIAGNOSTIC_JOB_READ_TOKEN')
           helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check/.github/scripts'
           sys.path.insert(0, str(helpers))
           import github_publication_receipts as receipts
           import remote_maven_readback as reader
           failed = []
-          def check(name, operation):
+          def check(name, operation, *, context=None, required=True):
+              record = {'check': name, 'read_only': True, **(context or {})}
               try:
                   details = operation()
                   print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
-                      {'check': name, 'result': 'PASS', 'read_only': True, **details}, sort_keys=True))
+                      {**record, 'result': 'PASS', **details}, sort_keys=True), flush=True)
+                  return details
               except Exception as error:
-                  failed.append(name)
+                  if required:
+                      failed.append(name)
                   print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
-                      {'check': name, 'result': 'FAIL', 'error_class': type(error).__name__,
+                      {**record, 'result': 'FAIL',
                       'http_status': getattr(error, 'status', None),
-                      'stage': getattr(error, 'stage', None)}, sort_keys=True))
+                      'stage': getattr(error, 'stage', None)}, sort_keys=True), flush=True)
           def api(name, path, accept):
               def operation():
                   if not policy_token:
@@ -136,22 +141,42 @@ jobs:
                   raise ValueError('Complete Engine package inventory required')
               selected = []
               for item in sorted(items, key=lambda v: v['name']):
-                  if (type(item.get('id')) is not int or item['id'] <= 0 or item.get('package_type') != 'maven'
+                  if (type(item.get('id')) is not int or not 0 < item['id'] <= 2**63 - 1 or item.get('package_type') != 'maven'
                           or not re.fullmatch(r'[A-Za-z0-9_.-]{1,255}', item.get('name', ''))
                           or item['repository'].get('full_name') != 'kira-manga/kira-source-engine'):
                       raise ValueError('Unexpected package identity')
                   selected.append({'id': item['id'], 'name': item['name'],
                       'repository_id': 1310736214, 'repository': 'kira-manga/kira-source-engine'})
-              versions = receipts.observe_json('/orgs/kira-manga/packages/maven/' +
-                  urllib.parse.quote(selected[0]['name'], safe='') + '/versions?per_page=100&page=1',
-                  package_token, collection=True, package_read=True)['value']
-              if any(type(v.get('id')) is not int or not isinstance(v.get('name'), str)
-                      or not re.fullmatch(r'[A-Za-z0-9_.+-]{1,128}', v['name']) for v in versions):
-                  raise ValueError('Unexpected version metadata')
-              return {'oauth_scopes': response['oauth_scopes'], 'packages': selected,
-                  'sample_package': selected[0]['name'], 'sample_versions': [{'id': v['id'], 'name': v['name']} for v in versions]}
-          check('package_identity_and_version_metadata', package_metadata)
-          # Check every distinct port even if another fails; never fall back to the job token.
+              expected = {reader.policy.GROUP + '.' + module + suffix for module in reader.policy.MODULES
+                  for suffix in reader.policy.PUBLICATIONS.values()}
+              if {item['name'] for item in selected} != expected:
+                  raise ValueError('Exact fifteen Engine package names required')
+              return {'http_status': 200, 'oauth_scopes': response['oauth_scopes'], 'packages': selected}
+          def versions(item, state, token, *, classic):
+              if not token:
+                  raise receipts.ReceiptObservationRefusal(None, 'token_validation')
+              response = receipts.observe_json('/orgs/kira-manga/packages/maven/' +
+                  urllib.parse.quote(item['name'], safe='') + '/versions?state=' + state + '&per_page=100&page=1',
+                  token, collection=True, package_read=classic)
+              try:
+                  values = reader._versions(response['value'])
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'versions': values}
+          metadata = check('package_identity_and_version_metadata', package_metadata)
+          if metadata is not None:
+              # Comparisons are informational only: never fallback or writer-custody approval.
+              channels = [('classic_package_read', package_token, metadata['packages'], True),
+                  ('policy_read_comparison', policy_token, metadata['packages'][:1], False),
+                  ('job_read_comparison', job_token, metadata['packages'][:1], False)]
+              for channel, token, packages, classic in channels:
+                  for item in packages:
+                      for state in ('active', 'deleted'):
+                          check('package_versions', lambda: versions(item, state, token, classic=classic),
+                              context={'package': item['name'], 'package_id': item['id'], 'state': state,
+                                  'credential_channel': channel, 'required': classic,
+                                  'diagnostic_only': True, 'custody_approval': False}, required=classic)
+          # Every required failure remains terminal even if a diagnostic comparison succeeds.
           raise SystemExit(1 if failed else 0)
           PY
 
