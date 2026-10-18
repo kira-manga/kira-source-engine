@@ -593,9 +593,9 @@ is covered by `test_github_branch_bypass_proof.BranchBypassProofTests` and the c
 
 `-PkiraPublicationMode=promote-remote` configures the **same fifteen original native writers**
 and task identities at the literal `https://maven.pkg.github.com/kira-manga/kira-source-engine`.
-Only `publish.yml`'s post-approval job receives a `packages:write` job token; read-only
-preflight and diagnostics cannot publish. The immediate pre-action guard requires fresh
-window/policy/package observations as well as original source, graph, action and native-byte
+Only `publish.yml`'s post-approval native publisher uploads packages. Its read-only
+preflight/access-check and the isolated metadata probe below cannot invoke that publisher. The immediate
+pre-action guard requires fresh window/policy/package observations as well as original source, graph, action and native-byte
 checks. Ordinary `publish` containment and the historical `release_holds()` comparison helper
 are unchanged; the latter is not an authorization path. Local `export` and `promote` retain
 their owned-file, credential-free behavior. Source/model/native-output/action
@@ -672,3 +672,29 @@ PYTHONPATH=.github/scripts python3 -B -m unittest -v \
   test_publisher_publication_intake.NativeAttachmentSourceTests \
   test_remote_maven_readback.RemoteMavenReadbackTests
 ```
+
+### Isolated mutation-capable metadata access probe
+
+The owner authorized a separate metadata-audit capability on 2026-10-18: GitHub's deleted-version
+GET requires deletion authority, which the independent classic payload token must not receive.
+`publish.yml`'s `metadata_audit_check=true` mode uses a **mutation/deletion-capable** short-lived,
+repository-scoped `GITHUB_TOKEN` (`packages:write`) solely in a separate Ubuntu job behind the
+same named `source-publication` approval (initiator approval allowed, admin bypass disabled).
+Its effective access to deleted versions must be proved by the real API, not assumed from YAML.
+It must not run concurrently with a publication window; shared workflow concurrency serializes
+this workflow, but does not exclude other/out-of-band writers.
+
+The probe is mutually exclusive with `access_check` and publication. It checks out only three
+reviewed read helpers at the exact protected workflow SHA without persisting credentials, and
+performs at most 31 fixed-host GETs: bounded package inventory and active/deleted versions for
+exactly the fifteen Engine package names. No producer checkout/build, custom action, mutation
+request, payload credential, approval receipt, output or artifact feeds the publisher. Failures
+remain failures, including 403, pagination, incomplete or malformed data. Only sanitized status
+and validated package/version identities are logged; the helper checkout is always removed.
+
+This credential is **not read-only** merely because this code only calls GET. No deletion is
+authorized. The classic payload-reader no-write/no-delete scope validator stays unchanged.
+This first capability probe does not establish production metadata isolation, full continuous
+registry observations, writer exclusion, or publication eligibility. Production remains held
+until that separate custody integration and focused security review are complete; a one-time
+snapshot must not substitute for the required fresh before/after-write observations.

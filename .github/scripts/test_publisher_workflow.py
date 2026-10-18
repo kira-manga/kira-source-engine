@@ -461,12 +461,12 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertNotIn("secret", errors.getvalue().lower())
         self.assertEqual(list(temporary.iterdir()), [])
 
-    def test_workflow_limits_write_custody_to_protected_native_recheck_and_finalizes_before_capture(self):
+    def test_workflow_isolates_privileged_probe_and_native_recheck_and_finalizes_before_capture(self):
         source = (Path(__file__).resolve().parents[1] / "workflows/publish.yml").read_text()
         self.assertIn("workflow_dispatch:", source)
-        self.assertIn("${{ inputs.access_check && github.event_name == 'workflow_dispatch'", source)
-        self.assertIn("${{ !inputs.access_check && github.event_name == 'workflow_dispatch'", source)
-        probe = source.split("  approval-and-access-check:", 1)[1].split("  preflight:", 1)[0]
+        self.assertIn("${{ inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch'", source)
+        self.assertIn("${{ !inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch'", source)
+        probe = source.split("  approval-and-access-check:", 1)[1].split("  approval-and-metadata-audit:", 1)[0]
         self.assertIn("environment: source-publication", probe)
         self.assertIn("packages: read", probe)
         self.assertEqual(probe.count("secrets."), 2)
@@ -504,7 +504,36 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertIn("github.repository_id == '1310736214'", source)
         self.assertIn("github.ref == 'refs/heads/remediation/production-readiness-2026-09-04'", source)
         before, protected = source.split("  protected-recheck:", 1)
-        self.assertNotIn("packages: write", before)
+        read_probe, audit_and_preflight = before.split("  approval-and-metadata-audit:", 1)
+        audit, preflight = audit_and_preflight.split("  preflight:", 1)
+        self.assertNotIn("packages: write", read_probe + preflight)
+        self.assertEqual(audit.count("packages: write"), 1)
+        self.assertIn("${{ inputs.metadata_audit_check && !inputs.access_check && github.event_name == 'workflow_dispatch'", audit)
+        for guard in ("github.repository == 'kira-manga/kira-source-engine'", "github.repository_id == '1310736214'",
+                      "github.ref == 'refs/heads/remediation/production-readiness-2026-09-04'", "github.run_attempt == 1",
+                      "github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref)",
+                      "github.workflow_sha == github.sha"):
+            self.assertIn(guard, audit)
+        self.assertIn("environment: source-publication", audit)
+        self.assertIn("runs-on: ubuntu-24.04", audit)
+        self.assertIn("timeout-minutes: 5", audit)
+        self.assertEqual(audit.count("github.token"), 1)
+        self.assertEqual(audit.count("uses:"), 1)
+        self.assertIn("actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5", audit)
+        self.assertIn("persist-credentials: false", audit)
+        self.assertIn("sparse-checkout-cone-mode: false", audit)
+        self.assertEqual(re.findall(r"^            /(.+)$", audit, re.M),
+                         [".github/scripts/publication_policy.py", ".github/scripts/github_publication_receipts.py",
+                          ".github/scripts/remote_maven_readback.py"])
+        self.assertLess(audit.index("os.environ.pop('KIRA_METADATA_AUDIT_JOB_TOKEN')"),
+                        audit.index("import github_publication_receipts"))
+        for forbidden in ("secrets.", "inputs.selection", "outputs:", "GITHUB_OUTPUT", "GITHUB_ENV", "needs:",
+                          "upload-artifact", "gradlew", "publisher_workflow.py", "bypass_branch", "subprocess", "package_read=True"):
+            self.assertNotIn(forbidden, audit)
+        self.assertIn("if: ${{ always() }}", audit)
+        self.assertIn("root.is_symlink()", audit)
+        self.assertIn("shutil.rmtree(root)", audit)
+        self.assertNotIn("KIRA_METADATA_AUDIT_JOB_TOKEN", read_probe + preflight + protected)
         self.assertNotIn("KIRA_MAVEN_WRITE_", before)
         self.assertEqual(protected.count("packages: write"), 1)
         self.assertEqual(protected.count("KIRA_MAVEN_WRITE_USERNAME: ${{ github.actor }}"), 1)
@@ -513,7 +542,7 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         self.assertNotIn("run: ./gradlew", source)
         self.assertIn("name: ${{ needs.preflight.outputs.environment }}", source)
         self.assertIn("needs.preflight.result == 'success'", source)
-        self.assertEqual(source.count("ref: ${{ github.workflow_sha }}"), 3)
+        self.assertEqual(source.count("ref: ${{ github.workflow_sha }}"), 4)
         self.assertEqual(source.count("fetch-depth: 0"), 2)
         self.assertIn("artifact-ids: ${{ needs.preflight.outputs.record_artifact_id }}", source)
         self.assertEqual(source.count("KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}"), 5)
@@ -611,6 +640,75 @@ class PackageVersionDiagnosticTests(unittest.TestCase):
                         self.assertIn((row["http_status"], row["stage"]), ((403, "request"), (200, "response_validation")))
                 for secret in ("synthetic_classic", "synthetic_policy", "synthetic_job", "unvalidated/body-or-token"):
                     self.assertNotIn(secret, output.getvalue())
+
+
+class MetadataAuditDiagnosticTests(unittest.TestCase):
+    def test_actual_probe_uses_only_exact_get_inventory_and_versions_and_refuses_safely(self):
+        source = (Path(__file__).resolve().parents[1] / "workflows/publish.yml").read_text()
+        job = source.split("  approval-and-metadata-audit:", 1)[1].split("  preflight:", 1)[0]
+        inline = job.split("python3 -B -E -s - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        tree = ast.parse(textwrap.dedent(inline))
+        start = next(i for i, node in enumerate(tree.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "failed" for target in node.targets))
+        program = compile(ast.Module(body=tree.body[start:], type_ignores=[]), "metadata-audit-inline", "exec")
+        names = sorted(policy.GROUP + "." + module + suffix for module in policy.MODULES
+                       for suffix in policy.PUBLICATIONS.values())
+        packages = [{"id": i + 1, "name": name, "package_type": "maven",
+                     "repository": {"id": 1310736214, "full_name": "kira-manga/kira-source-engine"}}
+                    for i, name in enumerate(names)]
+        for mode in ("pass", "deleted_refusal", "inventory_refusal", "wrong_name", "wrong_repository",
+                     "duplicate_id", "bad_version", "missing_token"):
+            with self.subTest(mode=mode):
+                calls = []
+                selected = copy.deepcopy(packages)
+                if mode == "wrong_name":
+                    selected[0]["name"] = "untrusted/path?token=synthetic_PRIVILEGED"
+                elif mode == "wrong_repository":
+                    selected[0]["repository"]["full_name"] = "another/repository"
+                elif mode == "duplicate_id":
+                    selected[0]["id"] = selected[1]["id"]
+
+                def observe(path, token, *, collection=False, package_read=False):
+                    # No caller-selected host/query/method, payload grant or credential fallback.
+                    self.assertEqual((token, collection, package_read), ("synthetic_PRIVILEGED", True, False))
+                    calls.append(path)
+                    if path == "/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1":
+                        if mode == "inventory_refusal":
+                            raise receipts.ReceiptObservationRefusal(403, "response_validation")
+                        values = selected
+                    else:
+                        self.assertIn(path, {"/orgs/kira-manga/packages/maven/" + name +
+                            "/versions?state=" + state + "&per_page=100&page=1"
+                            for name in names for state in ("active", "deleted")})
+                        if mode == "deleted_refusal" and "state=deleted" in path:
+                            raise receipts.ReceiptObservationRefusal(403, "response_validation")
+                        values = [{"id": 101, "name": "0.1.0"}]
+                        if mode == "bad_version" and len(calls) == 2:
+                            values = [{"id": 101, "name": "untrusted/synthetic_PRIVILEGED"}]
+                    return {"value": values, "status": 200, "oauth_scopes": None}
+
+                output = io.StringIO()
+                scope = {"json": json, "reader": reader, "token": "" if mode == "missing_token" else "synthetic_PRIVILEGED",
+                         "receipts": SimpleNamespace(observe_json=observe,
+                             ReceiptObservationRefusal=receipts.ReceiptObservationRefusal)}
+                with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                    exec(program, scope)
+                self.assertEqual(stopped.exception.code, int(mode != "pass"))
+                rows = [json.loads(line.removeprefix("KIRA_METADATA_AUDIT ")) for line in output.getvalue().splitlines()]
+                complete = mode in ("pass", "deleted_refusal", "bad_version")
+                self.assertEqual(len(calls), 31 if complete else (0 if mode == "missing_token" else 1))
+                self.assertEqual(len(rows), 31 if complete else 1)
+                self.assertEqual(len(calls), len(set(calls)))
+                self.assertEqual(sum(row["result"] == "FAIL" for row in rows),
+                                 0 if mode == "pass" else 15 if mode == "deleted_refusal" else 1)
+                self.assertTrue(all(row["method"] == "GET" and row["credential_channel"] == "short_lived_metadata_audit"
+                                    and row["mutation_capable_credential"] and row["diagnostic_only"]
+                                    and row["custody_approval"] is False for row in rows))
+                if complete:
+                    self.assertEqual({(row["package"], row["state"]) for row in rows[1:]},
+                                     {(name, state) for name in names for state in ("active", "deleted")})
+                self.assertNotIn("synthetic_PRIVILEGED", output.getvalue())
+                self.assertNotIn("untrusted", output.getvalue())
 
 
 class RefusalDiagnosticTests(unittest.TestCase):
