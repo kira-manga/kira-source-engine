@@ -19,7 +19,7 @@ def publisher_selection():
                  "workflow_ref": p.REPOSITORY + "/" + r.PUBLISHER_WORKFLOW + "@" + ref,
                  "source_sha": sha, "workflow_sha": sha, "run_id": 61, "run_attempt": 1, "workflow_id": 18}
     protection = {"environment": {"id": 71, "name": "publisher/release gate", "branch_policy_id": 501,
-                                   "reviewer_ids": [81, 82]},
+                                   "reviewer_ids": [81]},
                   "branches": [{"name": p.BRANCH, "tip": "e" * 40, "approvals": 0,
                                 "checks": [{"context": "verify", "app_id": 121}]},
                                {"name": ref[len("refs/heads/"):], "tip": sha, "approvals": 0,
@@ -459,7 +459,7 @@ class PublisherPolicyAcquisitionTests(unittest.TestCase):
         self.assertEqual(result["publisher"], selected_publisher)
         self.assertEqual(result["branches"], selected_protection["branches"])
         self.assertEqual([branch["approvals"] for branch in result["branches"]], [0, 0])
-        self.assertEqual(result["environment"]["reviewer_ids"], [81, 82])
+        self.assertEqual(result["environment"]["reviewer_ids"], [81])
         self.assertIs(result["environment"]["prevent_self_review"], False)
         self.assertNotIn("approved", json.dumps(result))
         self.assertNotIn("synthetic_", json.dumps(result))
@@ -669,6 +669,77 @@ class WorkflowAcquisitionTests(unittest.TestCase):
                 r.acquire_attestation_bundle(expected())
             self.assertEqual(len(self.requests), 1)
             self.assertClosed()
+
+
+class CollectionObservationTests(unittest.TestCase):
+    setUp = ReceiptAcquisitionTests.setUp
+    connect = ReceiptAcquisitionTests.connect
+    assertClosed = ReceiptAcquisitionTests.assertClosed
+
+    def reset(self, value, **kwargs):
+        self.assertClosed()
+        self.responses = [Response(value, **kwargs)]
+        self.connections.clear()
+        self.requests.clear()
+
+    def test_old_object_contract_and_explicit_collection_scope_metadata_are_separate(self):
+        self.reset({"id": 73})
+        self.assertEqual(r._get_json("/repos/" + p.REPOSITORY, "synthetic_read"), {"id": 73})
+        self.reset([{"id": 1001}], headers={"X-OAuth-Scopes": "repo, read:packages"})
+        result = r._get_collection("/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1",
+                                   "synthetic_read", package_read=True)
+        self.assertEqual(result, {"items": [{"id": 1001}], "oauth_scopes": ["read:packages", "repo"]})
+        self.assertNotIn("synthetic_read", json.dumps(result))
+        self.reset([])
+        with self.assertRaisesRegex(p.Refusal, "Receipt object required"):
+            r._get_json("/repos/" + p.REPOSITORY, "synthetic_read")
+        self.assertClosed()
+
+    def test_user_object_observation_checks_classic_read_scope_without_collection_mode(self):
+        self.reset({"id": 81, "login": "synthetic-owner"}, headers={"X-OAuth-Scopes": "read:packages"})
+        result = r.observe_json("/user", "synthetic_read", package_read=True)
+        self.assertEqual(result, {"value": {"id": 81, "login": "synthetic-owner"}, "status": 200,
+                                  "oauth_scopes": ["read:packages"], "stage": "response_validation"})
+        self.assertEqual(self.requests[0][0], ("GET", "/user"))
+        self.assertClosed()
+
+    def test_collection_completeness_and_missing_or_write_capable_scopes_fail_closed(self):
+        cases = [({}, {"X-OAuth-Scopes": "read:packages"}),
+                 ([{}] * 100, {"X-OAuth-Scopes": "read:packages"}), ([], {}),
+                 ([], {"X-OAuth-Scopes": "write:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "delete:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "read:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "repo"}),
+                 ([], {"X-OAuth-Scopes": "read:packages", "Link": '<https://api.github.com/next>; rel="next"'}),
+                 ([], {"X-OAuth-Scopes": "read:packages", "Age": "1"})]
+        for value, headers in cases:
+            with self.subTest(headers=headers):
+                self.reset(value, headers=headers)
+                with self.assertRaises(p.Refusal):
+                    r._get_collection("/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1",
+                                      "synthetic_read", package_read=True)
+                self.assertEqual(len(self.requests), 1)
+                self.assertClosed()
+
+    def test_diagnostics_expose_only_safe_status_and_fixed_stage_without_error_contents(self):
+        for status, headers in ((403, {}), (200, {"Content-Encoding": "gzip"})):
+            self.reset({"message": "synthetic_PRIVATE_body"}, status=status, headers=headers)
+            with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+                r.observe_json("/user", "synthetic_read")
+            self.assertEqual((caught.exception.status, caught.exception.stage), (status, "response_validation"))
+            self.assertEqual(str(caught.exception), "Official receipt observation refused")
+            self.assertTrue(caught.exception.__suppress_context__)
+            self.assertClosed()
+        self.reset({})
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r.observe_json("/user", "synthetic_SECRET\n")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "token_validation"))
+        self.assertEqual(self.requests, [])
+        self.factory.side_effect = OSError("synthetic_PRIVATE_provider")
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r.observe_json("/user", "synthetic_read")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "request"))
+        self.assertEqual(str(caught.exception), "Official receipt observation refused")
 
 
 if __name__ == "__main__":

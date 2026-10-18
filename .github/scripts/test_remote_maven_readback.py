@@ -3,12 +3,14 @@
 import copy
 import hashlib
 import io
+import json
 import ssl
 import unittest
 from unittest import mock
 
 import publication_policy as policy
 import remote_maven_readback as remote
+import test_github_publication_receipts as http_fixtures
 import test_publication_policy as fixtures
 
 
@@ -18,6 +20,26 @@ def index_bytes(artifact, versions, timestamp="20261017000000"):
             f'<artifactId>{artifact}</artifactId><versioning><latest>{versions[-1]}</latest>'
             f'<release>{versions[-1]}</release><versions>{values}</versions>'
             f'<lastUpdated>{timestamp}</lastUpdated></versioning></metadata>\n').encode()
+
+
+def selected_packages(repository_id=73):
+    names = {":" + module + ":" + publication: policy.GROUP + "." + module + suffix
+             for module in policy.MODULES for publication, suffix in policy.PUBLICATIONS.items()}
+    return {identity: {"id": 1001 + number, "name": name, "repository_id": repository_id}
+            for number, (identity, name) in enumerate(sorted(names.items()))}
+
+
+def registry_values(bindings, completed=(), version=fixtures.RELEASE):
+    packages = [{"id": item["id"], "name": item["name"], "package_type": "maven",
+                 "repository": {"id": item["repository_id"], "full_name": policy.REPOSITORY}}
+                for item in bindings.values()]
+    values = [packages]
+    for number, identity in enumerate(sorted(bindings)):
+        active = [{"id": 2001 + number, "name": "0.1.0"}]
+        if identity in completed:
+            active.append({"id": 3001 + number, "name": version})
+        values.extend((active, []))
+    return values
 
 
 class Response(io.BytesIO):
@@ -233,6 +255,31 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         self.assertTrue(all(response.read_count == 0 for response in self.responses[::2]))
         self.assertNotIn("synthetic_", repr(result))
 
+    def test_candidate_path_absence_rejects_partial_files_redirects_and_auth_errors_without_body_reads(self):
+        self.before()  # The bridge requires these authenticated positive indexes first.
+        paths = [row[0] for item in self.publications.values() for row in item["rows"]]
+        first = self.publications[self.identities[0]]["rows"][0][0]
+        with self.assertRaisesRegex(policy.Refusal, "^Existing or unobservable candidate path refused$"):
+            remote.refuse_existing_paths(self.inventory, fixtures.RELEASE, username="reader", token="synthetic_read")
+        for path in paths:
+            del self.objects[path]
+        count, response_count = len(self.requests), len(self.responses)
+        self.assertIsNone(remote.refuse_existing_paths(self.inventory, fixtures.RELEASE,
+                                                      username="reader", token="synthetic_read"))
+        self.assertEqual(len(self.requests) - count, len(paths))
+        self.assertTrue(all(response.read_count == 0 for response in self.responses[response_count:]))
+        for status in (200, 302, 304, 401, 403, 500):
+            self.status[first] = status
+            count = len(self.requests)
+            with self.subTest(status=status), self.assertRaises(policy.Refusal):
+                remote.refuse_existing_paths(self.inventory, fixtures.RELEASE, username="reader", token="synthetic_read")
+            self.assertEqual(len(self.requests), count + 1)
+        self.status.clear()
+        count = len(self.requests)
+        remote.refuse_existing_paths(self.inventory, fixtures.RELEASE, username="reader", token="synthetic_read",
+                                     active=self.identities[-1])
+        self.assertEqual(len(self.requests) - count, len(self.publications[self.identities[-1]]["rows"]))
+
     def test_redirect_location_bound_ambiguity_authority_and_control_characters_refuse_before_storage(self):
         path = self.index_path(self.identities[0])
         valid = "https://" + remote.STORAGE_HOST + "/object?sig=synthetic_SIGNED"
@@ -423,6 +470,81 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         self.http.side_effect = OSError("synthetic_PRIVATE_provider_error")
         with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
             self.verify(expected)
+
+
+class RemoteRegistryTests(unittest.TestCase):
+    connect = http_fixtures.ReceiptAcquisitionTests.connect
+    assertClosed = http_fixtures.ReceiptAcquisitionTests.assertClosed
+
+    def setUp(self):
+        http_fixtures.ReceiptAcquisitionTests.setUp(self)
+        self.bindings = selected_packages()
+        self.reset()
+        self.addCleanup(self.assertClosed)
+
+    def reset(self, values=None):
+        self.assertClosed()
+        values = registry_values(self.bindings) if values is None else values
+        self.responses = [http_fixtures.Response(value, headers={"X-OAuth-Scopes": "read:packages"}) for value in values]
+        self.connections.clear()
+        self.requests.clear()
+
+    def observe(self, **kwargs):
+        return remote.observe_registry(self.bindings, 73, fixtures.RELEASE, token="synthetic_PACKAGE_READ", **kwargs)
+
+    def test_all_fifteen_repository_associations_and_active_deleted_pages_are_observed(self):
+        before = self.observe()
+        self.assertEqual(set(before["packages"]), set(self.bindings))
+        self.assertEqual(len(self.requests), 31)
+        self.assertEqual(before["oauth_scopes"], ["read:packages"])
+        self.assertTrue(all(args[0] == "GET" and args[1].startswith("/orgs/kira-manga/packages") for args, _ in self.requests))
+        self.assertEqual(sum("state=deleted" in args[1] for args, _ in self.requests), 15)
+        self.assertNotIn("synthetic_PACKAGE_READ", json.dumps(before))
+        self.reset()
+        self.assertEqual(self.observe(before=before), before)
+
+    def test_missing_duplicate_wrong_repository_and_used_or_deleted_candidate_refuse(self):
+        original = registry_values(self.bindings)
+        changes = [lambda value: value[0].pop(), lambda value: value[0].append(value[0][0].copy()),
+                   lambda value: value[0][0]["repository"].update(id=999),
+                   lambda value: value[0][0].update(id=999),
+                   lambda value: value[1].append({"id": 4001, "name": fixtures.RELEASE}),
+                   lambda value: value[2].append({"id": 4001, "name": fixtures.RELEASE}),
+                   lambda value: value[1].append({"id": 2001, "name": "0.5.0"}),
+                   lambda value: value[1].append({"id": 4001, "name": "0.1.0"})]
+        for number, change in enumerate(changes):
+            values = copy.deepcopy(original)
+            change(values)
+            self.reset(values)
+            with self.subTest(change=number), self.assertRaisesRegex(policy.Refusal, "^Remote package registry observation refused$"):
+                self.observe()
+            self.assertClosed()
+
+    def test_only_genuine_completed_versions_may_appear_and_existing_ids_cannot_change(self):
+        before = self.observe()
+        first, second = sorted(self.bindings)[:2]
+        values = registry_values(self.bindings, [first])
+        self.reset(values)
+        with self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.reset(values)
+        progress = self.observe(before=before, completed=[first])
+        self.reset(registry_values(self.bindings, [first, second]))
+        result = self.observe(before=before, completed=[first, second], progress=progress)
+        self.assertEqual(len(result["packages"][first]["active"]), 2)
+        for field in ("existing", "candidate", "foreign", "deleted"):
+            values = registry_values(self.bindings, [first, second])
+            if field == "existing":
+                values[1][0]["id"] = 9999
+            elif field == "candidate":
+                values[1][1]["id"] = 9999
+            elif field == "foreign":
+                values[1].append({"id": 9999, "name": "9.9.9"})
+            else:
+                values[2].append({"id": 9999, "name": "0.0.9"})
+            self.reset(values)
+            with self.subTest(field=field), self.assertRaises(policy.Refusal):
+                self.observe(before=before, completed=[first, second], progress=progress)
 
 
 if __name__ == "__main__":

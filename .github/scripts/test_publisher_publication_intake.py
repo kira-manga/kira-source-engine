@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import time
 from unittest import mock
 import unittest
 
@@ -16,6 +17,28 @@ import test_connected_publication_intake as connected_fixtures
 import test_github_branch_bypass_proof as bypass_fixtures
 import test_github_publication_receipts as http_fixtures
 import test_publication_policy as fixtures
+import test_remote_maven_readback as registry_fixtures
+
+
+def selected_window(producer, invocation, protection):
+    now = int(time.time())
+    return {"not_before": now - 60, "expires_at": now + 3600,
+            "owner": {"id": protection["environment"]["reviewer_ids"][0], "login": "synthetic-owner"},
+            "disabled_workflow_ids": [producer["workflow_id"]],
+            "packages": registry_fixtures.selected_packages(invocation["repository_id"])}
+
+
+def window_values(selection, completed=()):
+    window, invocation = selection["release_window"], selection["publisher"]
+    values = [[window["owner"] | {"type": "User", "permissions": {"admin": True}}], [],
+              {"default_workflow_permissions": "read"},
+              {"total_count": 2, "workflows": [
+                  {"id": selection["producer"]["workflow_id"], "path": policy.WORKFLOW, "state": "disabled_manually"},
+                  {"id": invocation["workflow_id"], "path": receipts.PUBLISHER_WORKFLOW, "state": "active"}]}]
+    values += [{"total_count": 0, "workflow_runs": []} for _ in range(4)]
+    values += [{"total_count": 1, "workflow_runs": [http_fixtures.publisher_policy_values(
+        invocation, selection["protection"])[0]]}]
+    return values + registry_fixtures.registry_values(window["packages"], completed, selection["producer"]["version"])
 
 
 class PublisherIntakeTests(fixtures.OwnedFixture):
@@ -35,7 +58,8 @@ class PublisherIntakeTests(fixtures.OwnedFixture):
         invocation, protection = http_fixtures.publisher_selection()
         self.selection = {"producer": producer, "publisher": invocation, "protection": protection,
                           "app_parity_ref": "synthetic-app-parity-receipt-sha256:" + "1" * 64,
-                          "backend_parity_ref": "synthetic-backend-parity-receipt-sha256:" + "2" * 64}
+                          "backend_parity_ref": "synthetic-backend-parity-receipt-sha256:" + "2" * 64,
+                          "release_window": selected_window(producer, invocation, protection)}
         self.native_asset = self.root / "not-acquired-gh-asset"
         self.attestation = self.root / "not-signed.json"
         self.events, self.inventory_paths, self.connections, self.requests, self.responses = [], [], [], [], []
@@ -378,23 +402,31 @@ class PublisherWriterBoundaryTests(fixtures.OwnedFixture):
                                             "last_updated": "20260913000000", "size": 500, "sha256": "0" * 64}
                                   for identity in publications}
         return {"phase": "writer", "root": str(self.checkout), "archive": str(self.archive_path),
-                "record": {"selection": self.selection, "preflight": before},
+                "record": {"selection": self.selection, "preflight": before,
+                           "window": {"control": {"fixture": "synthetic"}, "registry": {"fixture": "synthetic"}}},
                 "context": {**{key: str(invocation[field]) for key, field in context_fields.items()},
                             "GITHUB_EVENT_NAME": "workflow_dispatch"},
                 "seal_sha256": self.selection["producer"]["seal_sha256"],
                 "inventory_sha256": self.selection["producer"]["inventory_sha256"],
-                "completed": [], "active": sorted(publications)[0], "indexes_before": None, "progress": None,
+                "completed": [], "active": sorted(publications)[0], "indexes_before": None, "progress": None, "window_progress": None,
                 "credentials": {"api_token": "synthetic_api_read", "username": "reader", "token": "synthetic_package_read"}}
 
     def test_bridge_binds_separate_invocation_and_restored_seal_before_network_and_never_invents_readback(self):
         before = self.admitted()
         request = self.request(before)
         indexes = self.patch(publisher.remote, "prewrite_indexes", return_value=self.synthetic_indexes)
+        absent = self.patch(publisher.remote, "refuse_existing_paths")
+        window = self.patch(publisher, "observe_release_window", return_value=request["record"]["window"])
         result = publisher.native_boundary(request)
         self.assertEqual(result["indexes_before"], self.synthetic_indexes)
         self.assertIsNone(result["readback"])
         self.assertEqual(result["completed"], [])
-        self.assertEqual(result["hold"], "stage-c-authority-and-live-rechecks-required")
+        self.assertEqual(result["scope"], "native-release-boundary-admitted")
+        self.assertEqual(result["expires_at"], self.selection["release_window"]["expires_at"])
+        absent.assert_called_once_with(self.metadata["inventory.tsv"], fixtures.RELEASE,
+                                       username="reader", token="synthetic_package_read")
+        window.assert_called_once_with(self.selection, api_token="synthetic_api_read", package_token="synthetic_package_read",
+                                       before=request["record"]["window"], completed=[], progress=None)
         self.assertNotIn("synthetic_package_read", json.dumps(result))
         self.assertNotIn("synthetic_api_read", repr(self.lineage.call_args))
         self.assertEqual(len(self.requests), 14)
@@ -416,7 +448,9 @@ class PublisherWriterBoundaryTests(fixtures.OwnedFixture):
         before = self.admitted()
         request = self.request(before)
         identity = request["active"]
-        request.update(phase="readback", active=None, completed=[identity], indexes_before=self.synthetic_indexes)
+        request.update(phase="readback", active=None, completed=[identity], indexes_before=self.synthetic_indexes,
+                       window_progress=request["record"]["window"])
+        self.patch(publisher, "observe_release_window", return_value=request["record"]["window"])
 
         def readback(inventory, version, previous, completed, **credentials):
             self.events.append("remote-readback")
@@ -457,12 +491,15 @@ class NativeAttachmentSourceTests(unittest.TestCase):
                     stdin.buffer.read.assert_not_called()
                 self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
 
-    def test_actual_native_attachment_retains_original_action_and_literal_hold_before_guard_completion(self):
+    def test_actual_native_attachment_retains_original_action_and_fresh_window_before_guard_completion(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "gradle/publication-gates.gradle.kts").read_text()
         guard = source.split('writer.doFirst("whole-cohort sealed byte guard") {', 1)[1].split("val recipe = writer.actions.toList()", 1)[0]
-        self.assertLess(guard.index("remoteObservation(bundle, writer)"), guard.index('requireBytes(false, "REMOTE_HELD"'))
-        self.assertLess(guard.index('requireBytes(false, "REMOTE_HELD"'), guard.index("guardedWriters.add(writer.path)"))
+        remote_guard = guard.split("if (remoteMode) {", 1)[1]
+        self.assertLess(remote_guard.index("remoteObservation(bundle, writer)"), remote_guard.index("auditPromotionGraph()"))
+        self.assertLess(guard.index("compareRestored(readBundle())"), guard.index("requireOpenWindow(observation)"))
+        self.assertLess(guard.index("requireOpenWindow(observation)"), guard.index("guardedWriters.add(writer.path)"))
+        self.assertNotIn('requireBytes(false, "REMOTE_HELD"', guard)
         self.assertIn("recipe[1] === nativeActions.single()", source)
         self.assertIn("selected.toSet() == writers.toSet()", source)
         self.assertIn("builder.environment().clear()", source)
@@ -492,8 +529,107 @@ class NativeAttachmentSourceTests(unittest.TestCase):
         self.assertNotIn("remoteDestination", model)
         self.assertNotIn("nativeCredentials", model)
         self.assertIn('"gradle/publication-gates.gradle.kts"', model)
-        self.assertIn("Remote package publication is disabled by Engine6 current-source containment.",
-                      (root / ".github/workflows/publish.yml").read_text())
+        normal = source.split("if (byteMode == null) {", 1)[1].split("} else {", 1)[0]
+        self.assertIn("allTasks.none { it is PublishToMavenRepository }", normal)
+        evidence = source.split('val observation = remoteObservation(bundle, null)', 1)[1].split("return@doLast", 1)[0]
+        self.assertLess(evidence.index("selected.forEach(::completed)"), evidence.index("Files.write(path, data, CREATE_NEW, WRITE)"))
+        self.assertLess(evidence.index("requireOpenWindow(observation)"), evidence.index("Files.write(path, data, CREATE_NEW, WRITE)"))
+        self.assertIn('"remote-readback.json"', evidence)
+
+
+class ReleaseWindowTests(unittest.TestCase):
+    connect = http_fixtures.ReceiptAcquisitionTests.connect
+    assertClosed = http_fixtures.ReceiptAcquisitionTests.assertClosed
+
+    def setUp(self):
+        http_fixtures.ReceiptAcquisitionTests.setUp(self)
+        invocation, protection = http_fixtures.publisher_selection()
+        producer = fixtures.expected()
+        self.selection = {"producer": producer, "publisher": invocation, "protection": protection,
+                          "app_parity_ref": "synthetic-app", "backend_parity_ref": "synthetic-backend",
+                          "release_window": selected_window(producer, invocation, protection)}
+        self.reset()
+        self.addCleanup(self.assertClosed)
+
+    def reset(self, values=None):
+        self.assertClosed()
+        values = window_values(self.selection) if values is None else values
+        self.responses = [http_fixtures.Response(value, headers={"X-OAuth-Scopes": "read:packages"}) for value in values]
+        self.connections.clear()
+        self.requests.clear()
+
+    def observe(self, **kwargs):
+        return publisher.observe_release_window(self.selection, api_token="synthetic_API_READ",
+                                                 package_token="synthetic_PACKAGE_READ", **kwargs)
+
+    def test_live_repo_and_complete_registry_recheck_uses_distinct_read_channels(self):
+        before = self.observe()
+        self.assertEqual(len(self.requests), 40)
+        self.assertEqual(before["control"]["active_run_id"], self.selection["publisher"]["run_id"])
+        for number, (_, request) in enumerate(self.requests):
+            token = "synthetic_API_READ" if number < 9 else "synthetic_PACKAGE_READ"
+            self.assertEqual(request["headers"]["Authorization"], "Bearer " + token)
+        self.assertNotIn("synthetic_API_READ", json.dumps(before))
+        self.assertNotIn("synthetic_PACKAGE_READ", json.dumps(before))
+        self.reset()
+        self.assertEqual(self.observe(before=before), before)
+        self.assertEqual(len(self.requests), 40)
+
+    def test_bad_window_or_extra_grant_refuses_before_http(self):
+        original = copy.deepcopy(self.selection["release_window"])
+        cases = [None, original | {"approved": True}, original | {"expires_at": original["not_before"]},
+                 original | {"expires_at": original["not_before"] + 14401},
+                 original | {"expires_at": int(time.time()) - 1},
+                 original | {"owner": original["owner"] | {"id": 999}},
+                 original | {"disabled_workflow_ids": [18]}, original | {"disabled_workflow_ids": [17, 17]},
+                 original | {"packages": {}}]
+        for value in cases:
+            with self.subTest(value=value):
+                self.selection["release_window"] = value
+                with self.assertRaisesRegex(policy.Refusal, "^Release window observation refused$"):
+                    self.observe()
+                self.assertEqual(self.requests, [])
+        self.selection["release_window"] = original
+
+    def test_other_writers_enabled_workflows_runs_or_default_permission_changes_refuse(self):
+        original = window_values(self.selection)
+        changes = [lambda value: value[0].append({"id": 999}), lambda value: value[0][0]["permissions"].update(admin=False),
+                   lambda value: value[1].append({"id": 999}),
+                   lambda value: value[2].update(default_workflow_permissions="write"),
+                   lambda value: value[3]["workflows"][0].update(state="active"),
+                   lambda value: value[3]["workflows"][1].update(path=".github/workflows/other.yml"),
+                   lambda value: value[3].update(total_count=3),
+                   lambda value: value[4].update(total_count=1, workflow_runs=[{}]),
+                   lambda value: value[8]["workflow_runs"][0].update(run_attempt=2)]
+        for number, change in enumerate(changes):
+            values = copy.deepcopy(original)
+            change(values)
+            self.reset(values)
+            with self.subTest(change=number), self.assertRaisesRegex(policy.Refusal, "^Release window observation refused$"):
+                self.observe()
+            self.assertTrue(all("/orgs/" not in args[1] for args, _ in self.requests))
+
+    def test_control_snapshot_change_and_expiry_during_network_are_not_cached_passes(self):
+        before = self.observe()
+        values = window_values(self.selection)
+        values[3]["workflows"][0]["path"] = ".github/workflows/replaced.yml"
+        self.reset(values)
+        with self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.reset()
+        clock = [self.selection["release_window"]["not_before"] + 1]
+        connect = self.connect
+
+        def advance(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            if len(self.connections) == 40:
+                clock[0] = self.selection["release_window"]["expires_at"]
+            return connection
+
+        self.factory.side_effect = advance
+        with mock.patch.object(publisher.time, "time", side_effect=lambda: clock[0]), self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.assertEqual(len(self.requests), 40)
 
 
 if __name__ == "__main__":

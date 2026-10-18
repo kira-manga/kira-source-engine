@@ -2,6 +2,24 @@
 
 Platform-neutral Kotlin Multiplatform contracts and execution for Kira’s config-driven manga sources.
 
+## Current single-owner release policy
+
+The owner-authorized policy uses real PRs and required `verify` checks from GitHub
+Actions (app15368), but **zero mandatory human source approvals** and no distinct
+last-push approval. Both `main` and the integration branch enforce these checks for
+administrators, resolve conversations and disallow bypass, force pushes and deletion.
+CI accepts PRs to either branch; only the integration push can produce a release cohort.
+GitHub cannot approve one's own PR; no fake approval is created or required.
+
+Publication still requires an actual approval by the named owner in `source-publication`.
+Initiator approval is allowed (`prevent_self_review=false`); admin bypass remains disabled.
+The protected caller below is configured for the observed environment/branch-rule identities.
+This source wiring is **not evidence of successful remote publication**. Only a completed
+native upload, complete remote byte readback and real App/Backend consumer acceptance establish
+that result. Earlier Stage A/B/held-slice descriptions below are historical implementation
+boundaries; the current connected workflow and native attachment sections supersede their
+blanket "publisher disabled" statements, not their remaining safety requirements.
+
 ## Modules
 
 - `source-contract` — signed configuration models, transport ports, validation contracts, and neutral results.
@@ -323,24 +341,22 @@ subprocesses and Git; the same command also includes nine real-Git lineage tests
 proves production bytes, signatures, consumer parity or remote qualification. YAML
 trigger/permission/action/phase review remains a separate obligation.
 
-## Gates still required before any remote activation
+## Gates required for each remote publication
 
-| Gate | Still open; not implemented or waived by containment |
+| Gate | Required evidence; not waived by single-owner policy |
 |---|---|
-| External write authority | Owner-established effective package-write exclusion, including historical/alternate workflows and other writers. Restricted token defaults or an environment-held credential alone are not that boundary. Historical protection failures and package403 are not current capability or absence proof; no settings/token workaround is authorized. |
-| Approval and protected identity | Genuine GitHub approval/attestation capability; a pre-existing protected environment with required reviewers, owner-authorized self-approval (`prevent_self_review=false`), no admin bypass and an explicit publisher-branch policy; protected main ancestry and distinct approved publisher/producer workflow revisions. Environment existence or manual dispatch alone is not approval. |
+| External write authority | Owner-established effective package-write exclusion, including historical/alternate workflows and other writers. Restricted token defaults or an environment-held credential alone are not that boundary. A bounded owner-controlled window disables other workflows and reobserves repository writers, runs and package state; the operator separately accounts for out-of-band credentials and org installations. Historical failures are not current capability or absence proof. |
+| Approval and protected identity | Genuine GitHub approval/attestation capability; a pre-existing protected environment with required reviewers, owner-authorized self-approval (`prevent_self_review=false`), no admin bypass and an explicit publisher-branch policy; protected source ancestry and independently bound producer/publisher invocations. Source PR approvals are not required. Environment existence or manual dispatch alone is not approval. |
 | Release version and provenance | Owner-approved committed canonical version matching tag/project/publications; exact peeled source SHA/tree, repository/workflow/run/attempt/artifact/digest identity, successful trusted CI and verified signed subject/signer/source identity. Recheck mutable facts after approval; author-written PASS JSON is not provenance. |
 | Complete native outgoing bytes | A separately proven pre-first-write gate for the complete three-module root/Android/JVM/Apple publication set: binaries, sources, POMs, `.module` links and deterministic sidecars, with mutable Maven index semantics handled separately. Preserve native Gradle components and byte identity even for direct single-publication requests; no custom uploader, dropped targets, hash normalization or relabelled rebuilds. |
 | Registry and partial releases | Authoritatively unused complete target GAV set, effective serialization against other writers and an explicit non-atomic multi-publication failure policy. HTTP401/403/errors do not prove absence. No overwrite, deletion, retagging, workflow/release-level retry/resume or partial-version reuse is authorized. |
 | Completion and consumers | Same-manifest complete remote readback, both real reader contexts resolving exact new GAVs, reviewed final source/dependency delta and joint App/Backend parity acceptance. Missing, partial or unreadable evidence holds activation. |
 
 Gradle9.6.1's native publisher retries individual PUTs and can merely warn on SHA256/SHA512
-sidecar upload failures. A future activation decision must represent those semantics honestly:
+sidecar upload failures. The protected caller represents those semantics honestly:
 there is no blanket no-transport-retry guarantee, and Gradle exit0 is not complete remote
-readback. The owned-file source gate remains unqualified; remote wiring and the larger
-authorization/publication framework remain deferred, not silently accepted. Engine6 remains
-PARTIAL/open. Engine5's provisional cohort and raw failures remain unactivated and retain
-their previously accepted scopes.
+readback. Remote qualification remains incomplete until actual hosted execution and complete
+readback succeed. Engine6 remains PARTIAL/open; source changes alone do not close it.
 
 ## Read-only release lineage observation
 
@@ -489,7 +505,7 @@ PYTHONPATH=.github/scripts python3 -B -m unittest \
   test_connected_publication_intake.ConnectedIntakeTests -v
 ```
 
-### Connected publisher preflight/recheck (read-only)
+### Connected protected publisher and read-only credential diagnostic
 
 `publisher_publication_intake.publisher_preflight(...)` and `publisher_recheck(...)`
 reuse actual connected candidate intake, acquire fresh publisher/policy observations,
@@ -498,10 +514,17 @@ repeats native verification and official receipt/policy reads before comparing t
 it cannot reuse a saved PASS. The independent selection contains `producer`, `publisher`,
 `protection`, `app_parity_ref` and `backend_parity_ref`. The publisher is a **separate**
 exact repository/run/workflow/ref/SHA tuple: dispatch, attempt 1, currently in progress,
-not the completed producer. The future trusted workflow must supply its own invocation.
-The normal publisher intake still selects no operational environment, reviewer, version,
-publisher branch or parity evidence. Parity references are bounded bindings, not assertions
-of passing qualification; the separate diagnostic below fixes only its own approval environment.
+not the completed producer. The trusted `publisher_workflow.py` supplies its own invocation.
+Its fixed policy binds integration, environment24588601457, branch-policy63403649,
+owner104788132, integration rule `BPR_kwDOTiA_Vs4FEN_x` and `verify`/app15368.
+Dispatch supplies the independently selected producer, tag/tip, parity references and finite
+`release_window`. Parity references are bounded bindings, not assertions of passing tests.
+The selected window contains UTC epoch `not_before`/`expires_at` (at most four hours), the
+sole owner ID/login, every other workflow ID to disable, and all15 package ID/name/repository
+bindings. Observe these independently; never guess values from an artifact or accept an
+`approved=true` field. Disable only the selected competing workflows after production and
+consumer verification finish; verify no other nonterminal run, retain the window through
+readback, then restore only the settings changed for it. An expired/changed window refuses.
 
 The existing `publish.yml` also offers an explicit `access_check=true` dispatch with
 `selection={}`. It exercises the fixed `source-publication` native approval boundary
@@ -511,8 +534,10 @@ checkout of the exact workflow commit uses the existing API adapter to check Eng
 metadata, administration, contents, run, attestation and environment read ports. The
 package token's public account identity and the known `0.1.0` POM are checked with the
 actual reader, requiring matching coordinates. Registry credentials never reach the
-one permitted HTTPS storage hop. Only fixed check results/error classes and public
-account/POM byte facts are reported; credential values are not persisted or printed.
+one permitted HTTPS storage hop. The classic token must explicitly grant `read:packages`,
+not `write:packages` or `delete:packages`; the same adapter checks the15 package identities
+and a bounded version sample. Only fixed result/error/status/stage facts, granted scope names
+and public account/package/POM facts are reported; credential values are not persisted or printed.
 Every distinct check is attempted; any failure fails the job. The disposable checkout
 is always cleaned up. There are no artifacts, publisher outputs or write permissions,
 and publisher jobs are skipped. Success proves these selected read checks passed,
@@ -544,46 +569,51 @@ repository and selects its numeric ID, ref and effective protection rule. The re
 must match the selected repository ID, full repository name, branch name, rule node ID
 and literal branch rule pattern. Closed data, integer zero total count, an empty node
 list and `hasNextPage=false` are all required. GraphQL errors (even with partial data),
-null/extra fields, wildcard rules and incomplete lists refuse. Both selected branches
-are checked independently; recheck reacquires the query rather than reusing a proof.
+null/extra fields, wildcard rules and incomplete lists refuse. Every selected branch
+is checked independently; recheck reacquires the query rather than reusing a proof.
 The same TLS, timeout, 8MiB response, cache/Age and cleanup controls apply, with no
-redirects or retries. Actual Engine rule IDs and token field visibility must be selected
-and verified legitimately later; synthetic tests are not evidence of live compatibility.
+redirects or retries. The integration rule ID is fixed by the current trusted policy; token field visibility
+is verified by the actual reads. Synthetic tests are not evidence of live compatibility.
 
 The old three-GET environment observation API is unchanged. These sequential observations
 are neither atomic nor native approval: workflow placement behind genuine environment
 approval, later writer-boundary rechecks, all-writer/unused-GAV authority, remote Maven
-readback and consumer acceptance remain separate. Both full calls require a fresh checkout,
-before Gradle restoration, and keep the unconditional Stage C hold. Neither fresh API
-discovers credentials or activates a workflow/publisher; explicit read tokens only reach
-the fixed official API, never native verification or Git. The held late-boundary attachment
-below does not replace either fresh call.
+readback and consumer acceptance remain separate. Both full calls require a fresh checkout
+before Gradle restoration. Neither API discovers credentials; explicit read tokens only
+reach their fixed official read ports, never native verification or Git. The protected caller
+runs fresh intake and window admission before authenticated bootstrap/help, and reobserves
+the window before restoring the sealed native inputs. The late attachment below does not
+replace either fresh call.
 Focused synthetic classes are `test_publisher_publication_intake.PublisherIntakeTests` and
 `test_github_publication_receipts.PublisherPolicyAcquisitionTests`. The new query boundary
 is covered by `test_github_branch_bypass_proof.BranchBypassProofTests` and the caller's
 `test_recheck_reacquires_each_bypass_proof_and_binds_selected_rule_ids` method; no live approval follows.
 
-### Held native remote writer/readback attachment
+### Guarded native remote writer/readback attachment
 
 `-PkiraPublicationMode=promote-remote` configures the **same fifteen original native writers**
 and task identities at the literal `https://maven.pkg.github.com/kira-manga/kira-source-engine`.
-It is **not enabled publication**: the immediate pre-action guard unconditionally refuses
-after its read-only observations. No property, comparison JSON or credential clears that hold.
-`publish.yml`, ordinary `publish` containment and `release_holds()` are unchanged. Local `export`
-and `promote` keep their owned-file, credential-free behavior. Source/model/native-output/action
+Only `publish.yml`'s post-approval job receives a `packages:write` job token; read-only
+preflight and diagnostics cannot publish. The immediate pre-action guard requires fresh
+window/policy/package observations as well as original source, graph, action and native-byte
+checks. Ordinary `publish` containment and the historical `release_holds()` comparison helper
+are unchanged; the latter is not an authorization path. Local `export` and `promote` retain
+their owned-file, credential-free behavior. Source/model/native-output/action
 checks are not relaxed: destination/authentication is separately audited, not inserted into or
 stripped from the sealed producer model. A new same-source export is required after gate changes.
 
-The eventual trusted caller must run both fresh native-attested publisher APIs **before** any
-generated roots exist, then restore only admitted raw files into the fixed input directory.
-This slice supplies no replacement intake PASS, native approval, tag/version selection, workflow,
-registry absence/reservation or all-writer exclusion. Those real integrations remain prerequisites
-to any separately reviewed hold removal; a Maven404 is never absence authority. Backend preview
-or source tests do not establish App/Backend package-consumer parity.
+The trusted caller runs both fresh native-attested publisher APIs **before** generated roots
+exist, then restores only admitted raw files into the fixed input directory. It reuses the
+qualified authenticated libffi bootstrap/private native profile and original native Gradle
+uploader; it does not rebuild/relabel the admitted binaries or introduce another uploader.
+The whole selected package inventory, repository association, active/deleted version lists
+and authenticated Maven observations must agree on an unused candidate. A Maven404 alone
+is never absence authority. Backend preview or source tests do not establish real package
+consumer parity; those qualified inputs remain a separate operational requirement.
 
-The held branch requires actual hosted Darwin/ARM64, existing Java21/Gradle9.6.1/offline admission,
+The protected branch requires actual hosted Darwin/ARM64, existing Java21/Gradle9.6.1/offline admission,
 no build/configuration cache, no `--continue`, and the exact whole-cohort producer exclusions.
-Keep the already admitted archive plus `{ "selection": ..., "preflight": ... }` comparison in
+Keep the already admitted archive plus `{ "selection": ..., "preflight": ..., "window": ... }` comparison in
 `$RUNNER_TEMP/kira-publisher-<publisher-run-id>-1/{kira-publication-bytes.tar,comparison.json}`:
 same-owner directory0700/files0600, no symlinks, outside the checkout. Supply the independently
 retained comparison-file hash as `kiraPublisherRecordSha256`, alongside the existing seal hash.
@@ -607,6 +637,7 @@ At each writer the helper rereads source/archive, fresh official producer/publis
 facts and local lineage, comparing the original preflight. It intentionally uses generated-root-
 aware source comparison **only alongside** this invocation's restore/verify and the original
 whole-output/model/graph/action checks, which repeat after HTTP immediately before the native action.
+It also rechecks the finite window, competing workflows/runs and all15 package version lists.
 First it observes all15 existing artifact indexes with all four checksums. Missing/ambiguous indexes
 refuse; a new artifact without an existing index needs separately proved authority/handling.
 At later boundaries only newly successful writers' immutable payloads/sidecars are read once;
@@ -615,7 +646,8 @@ must remain at their pre-write state. Progress lives only in the serialized invo
 not a saved receipt/cache. This avoids quadratic payload downloads while retaining the still-required
 global writer exclusion. The finalizer deliberately ignores progress and rereads every immutable row.
 
-Remote GETs use the fixed TLS host/path, no redirect/retry/304/content decoding, bounded time/bytes
+Remote GETs use the fixed TLS host/path and at most one already-qualified credential-free
+registry-storage hop; no retry/304/content decoding, bounded time/bytes
 and content-free failures. Every payload and deterministic sidecar must match admitted size/SHA256.
 Mutable index XML is separately bounded/strict: retain prior version order, append the candidate
 once, check coordinates/latest/release/timestamp and all four hashes of **actual** index bytes.
@@ -623,7 +655,14 @@ It is not a sealed or expected timestamp/index. Partial/failing writers still fa
 once a native action started, the finalizer attempts bounded readback, never cleanup/overwrite/retry
 of remote state. Native Gradle itself can retry individual PUTs or warn on some checksum failures;
 its unchanged action is not atomic publication. Pinned native remote/offline behavior and the fixed
-Darwin interpreter/process boundary still require actual hosted qualification before activation.
+Darwin interpreter/process boundary still require actual hosted qualification.
+
+The caller captures bounded credential-redacted native logs, stops only its owned Gradle
+workers immediately, then finalizes provenance before uploading diagnostics (three-day
+retention). Only after evidence capture does receipt-gated cleanup remove its owned outputs.
+A failed/partial upload is never retried, overwritten, deleted or reported as no writes;
+complete readback is required even when Gradle exits0. A finite window is not a claim that
+an authorized administrator is technically unable to change their own repository.
 
 Focused offline tests (synthetic Git/native/API/HTTP and source assertions, **not Gradle execution**):
 

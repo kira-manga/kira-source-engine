@@ -8,6 +8,8 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.CREATE_NEW
+import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
@@ -52,14 +54,15 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
 import org.w3c.dom.Element
 
-// Stage A stays local. The explicit remote attachment is unconditionally HELD, not release
-// approval or a sandbox for arbitrary Gradle/init code. Native actions remain unchanged.
+// Stage A stays local. Explicit remote mode requires the protected caller, finite selected
+// window and fresh writer-time admission. It is not a sandbox for arbitrary Gradle/init code.
 abstract class KiraPublicationByteState : BuildService<BuildServiceParameters.None> {
     @Volatile var restoredSeal: String? = null
     @Volatile var verifiedSeal: String? = null
     val guardedWriters = linkedSetOf<String>()
     var remoteIndexes: Map<*, *>? = null
     var remoteReadback: Map<*, *>? = null
+    var remoteWindow: Map<*, *>? = null
 }
 
 fun requireBytes(condition: Boolean, code: String, detail: String) {
@@ -869,7 +872,7 @@ if (byteMode == null) {
                 return bytes
             }
             val record = jsonMap(JsonSlurper().parseText(String(recordBytes(), UTF_8)))
-            requireBytes(record.keys == setOf("selection", "preflight"), "REMOTE_RECORD", "Unexpected comparison record fields.")
+            requireBytes(record.keys == setOf("selection", "preflight", "window"), "REMOTE_RECORD", "Unexpected comparison record fields.")
             val readUsername = remoteCredential("KIRA_MAVEN_READ_USERNAME", "[A-Za-z0-9_-]{1,100}")
             val readToken = remoteCredential("KIRA_MAVEN_READ_TOKEN", "[A-Za-z0-9_.-]{1,1024}")
             val apiToken = remoteCredential("KIRA_PUBLICATION_API_READ_TOKEN", "[A-Za-z0-9_.-]{1,1024}")
@@ -888,6 +891,7 @@ if (byteMode == null) {
                 "seal_sha256" to bundle.seal, "inventory_sha256" to sha256(incoming.resolve("inventory.tsv").toFile().readBytes()),
                 "completed" to completedIds, "active" to active?.let(::publicationIdentity), "indexes_before" to state.get().remoteIndexes,
                 "progress" to if (active == null) null else state.get().remoteReadback,
+                "window_progress" to state.get().remoteWindow,
                 "credentials" to mapOf("api_token" to apiToken, "username" to readUsername, "token" to readToken))
             val input = JsonOutput.toJson(request).toByteArray(UTF_8)
             requireBytes(input.size <= 8 * 1024 * 1024, "REMOTE_HELPER", "Boundary input exceeds its bound.")
@@ -980,14 +984,22 @@ if (byteMode == null) {
                 requireBytes(child.waitFor(5, TimeUnit.SECONDS) && !expired.get() && child.exitValue() == 0,
                     "REMOTE_HELPER", "Read-only native boundary refused; child output is not exposed.")
                 val result = jsonMap(JsonSlurper().parseText(output.toString(UTF_8)))
-                requireBytes(result.keys == setOf("scope", "completed", "seal_sha256", "inventory_sha256", "comparison_sha256", "indexes_before", "readback", "hold") &&
-                    result["scope"] == "held-native-boundary-observation-only" && result["hold"] == "stage-c-authority-and-live-rechecks-required" &&
+                requireBytes(result.keys == setOf("scope", "completed", "active", "seal_sha256", "inventory_sha256", "comparison_sha256", "indexes_before", "readback", "window", "expires_at", "producer", "publisher_run_id") &&
+                    result["scope"] == "native-release-boundary-admitted" && result["active"] == active?.let(::publicationIdentity) &&
                     result["seal_sha256"] == bundle.seal && result["inventory_sha256"] == request["inventory_sha256"] &&
                     jsonList(result["completed"]) == completedIds,
-                    "REMOTE_HELPER", "Read-only boundary response binding changed.")
+                    "REMOTE_HELPER", "Native boundary response binding changed.")
+                val selection = jsonMap(record["selection"])
+                val producer = jsonMap(result["producer"])
+                val producerFields = setOf("run_id", "source_sha", "seal_sha256", "inventory_sha256")
+                requireBytes(producer.keys == producerFields && producerFields.all { producer[it] == jsonMap(selection["producer"])[it] } &&
+                    result["publisher_run_id"] == jsonMap(selection["publisher"])["run_id"] &&
+                    result["expires_at"] == jsonMap(selection["release_window"])["expires_at"],
+                    "REMOTE_HELPER", "Native producer, publisher or window binding changed.")
                 recordBytes() // Do not let remote observations conceal mutation of the selected comparison.
                 state.get().remoteIndexes = jsonMap(result["indexes_before"])
                 state.get().remoteReadback = result["readback"]?.let(::jsonMap)
+                state.get().remoteWindow = jsonMap(result["window"])
                 return result
             } catch (_: Exception) {
                 throw GradleException("KIRA_PUBLICATION_BYTES_REMOTE_HELPER: Read-only boundary refused; no release authority.")
@@ -1010,6 +1022,13 @@ if (byteMode == null) {
             readRemoteObservation(bundle, active)
         } catch (_: Exception) {
             throw GradleException("KIRA_PUBLICATION_BYTES_REMOTE_HELPER: Read-only boundary refused; no release authority.")
+        }
+
+        fun requireOpenWindow(observation: Map<*, *>) {
+            val expiry = observation["expires_at"]
+            requireBytes(expiry is Int || expiry is Long, "REMOTE_WINDOW", "Native window expiry is not an integer.")
+            requireBytes(System.currentTimeMillis() / 1000 < (expiry as Number).toLong(),
+                "REMOTE_WINDOW", "Native release window expired before the original action.")
         }
 
         // Assigned after all task providers exist; called at graph readiness and again at
@@ -1108,7 +1127,16 @@ if (byteMode == null) {
                     val observed = jsonMap(observation["readback"])
                     requireBytes(jsonList(observed["completed"]) == selected.map(::publicationIdentity).sorted() &&
                         observed["inventory_sha256"] == observation["inventory_sha256"], "READBACK", "Incomplete actual remote readback.")
-                    logger.lifecycle("Actual native remote bytes matched all fifteen publications; not consumer acceptance or release authority.")
+                    requireOpenWindow(observation)
+                    val evidence = mapOf("scope" to "native-remote-maven-readback", "record_sha256" to recordPin,
+                        "producer" to observation["producer"], "publisher_run_id" to observation["publisher_run_id"],
+                        "publications" to selected.map(::publicationIdentity).sorted(), "readback" to observed,
+                        "window" to observation["window"])
+                    val data = JsonOutput.toJson(evidence).toByteArray(UTF_8)
+                    requireBytes(data.size <= 8 * 1024 * 1024, "READBACK", "Native readback evidence exceeds its bound.")
+                    val path = owned(byteRoot.resolve("remote-readback.json").toFile(), false)
+                    Files.write(path, data, CREATE_NEW, WRITE)
+                    logger.lifecycle("Actual native remote bytes matched all fifteen publications; consumer registry acceptance remains separate.")
                     return@doLast
                 }
                 requireBytes(selected.isNotEmpty() && state.get().guardedWriters == selected.map { it.path }.toSet(), "READBACK", "Missing native writer guards.")
@@ -1170,12 +1198,12 @@ if (byteMode == null) {
                 if (guarded.isEmpty()) emptyDestination()
                 else writers.filter { it.path in guarded }.forEach(::completed)
                 if (remoteMode) {
-                    remoteObservation(bundle, writer)
+                    val observation = remoteObservation(bundle, writer)
                     // HTTP and Git were suspension/mutation windows. Re-audit the entire original
                     // source/model/output/action boundary, not merely a cached before-network PASS.
                     auditPromotionGraph()
                     compareRestored(readBundle())
-                    requireBytes(false, "REMOTE_HELD", "Stage C authority, genuine native approval and all-writer/unused-GAV admission remain unconditionally required.")
+                    requireOpenWindow(observation)
                 }
                 requireBytes(state.get().guardedWriters.add(writer.path), "FRESH_CHECK", "A native writer cannot be reused in this invocation.")
             }

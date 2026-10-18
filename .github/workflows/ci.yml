@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - remediation/production-readiness-2026-09-04
+      - main
   push:
     branches:
       - remediation/production-readiness-2026-09-04
