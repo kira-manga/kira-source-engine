@@ -181,8 +181,8 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
             -Pkotlin.compiler.execution.strategy=in-process "${roots[@]}" \
             2>&1 | tee "$KIRA_CI_ROOT/diagnostics/production.log"
-          # Exercise the remote-only credentials factory without any publish task
-          # or real credentials. Reuse the installed pinned runtime offline.
+          # Exercise the remote-only API/mode without publishing or HTTP: builtin
+          # plugin, no dependency repositories, synthetic credentials, cached runtime.
           python3 -B - <<'PY'
           import os, pathlib, re
           root = pathlib.Path(os.environ['KIRA_CI_ROOT'])
@@ -213,10 +213,42 @@ jobs:
           assert actual.username == 'synthetic-user' && actual.password == 'synthetic-password'
           assert repository.authentication.size() == 1
           assert repository.authentication.getByName('basic') instanceof BasicAuthentication
-          println 'Pinned Gradle credential type, action and Basic authentication admitted.'
+          assert !gradle.startParameter.isOffline()
+          assert !gradle.startParameter.isRefreshDependencies()
+          assert repositories.isEmpty()
+          def beforeHook = configurations.create('beforeHook')
+          def observed = []
+          configurations.configureEach { configuration ->
+              configuration.incoming.beforeResolve {
+                  observed.add(configuration.name)
+                  throw new GradleException('Synthetic named dependency resolution refused')
+              }
+          }
+          def afterHook = configurations.create('afterHook')
+          [beforeHook, afterHook].each { configuration ->
+              configuration.canBeResolved = true
+              configuration.canBeConsumed = false
+              dependencies.add(configuration.name, 'example.invalid:no-network:0')
+              try {
+                  configuration.resolve()
+                  throw new AssertionError('Expected beforeResolve refusal')
+              } catch (GradleException expected) {
+                  assert observed.last() == configuration.name
+                  def cause = expected
+                  def deliberateRefusal = false
+                  for (int depth = 0; cause != null && depth < 8; depth++) {
+                      deliberateRefusal |= cause.message == 'Synthetic named dependency resolution refused'
+                      cause = cause.cause
+                  }
+                  assert deliberateRefusal
+              }
+          }
+          assert observed == ['beforeHook', 'afterHook']
+          gradle.taskGraph.whenReady { graph -> assert graph.allTasks*.path == [':help'] }
+          println 'Pinned credential API, online mode and named beforeResolve refusal verified; no publication.'
           ''')
           PY
-          ./gradlew --offline --no-daemon --no-parallel --max-workers=1 --console=plain \
+          ./gradlew --no-daemon --no-parallel --max-workers=1 --console=plain \
             --no-build-cache --no-configuration-cache \
             '-Dorg.gradle.jvmargs=-Xmx256m -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8' \
             -p "$KIRA_CI_ROOT/tmp/credentials-api-check" help \
