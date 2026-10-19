@@ -180,6 +180,46 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' \
             -Pkotlin.compiler.execution.strategy=in-process "${roots[@]}" \
             2>&1 | tee "$KIRA_CI_ROOT/diagnostics/production.log"
+          # Exercise the remote-only credentials factory without any publish task
+          # or real credentials. Reuse the installed pinned runtime offline.
+          python3 -B - <<'PY'
+          import os, pathlib, re
+          root = pathlib.Path(os.environ['KIRA_CI_ROOT'])
+          assert not root.is_symlink() and (root / 'tmp').resolve(strict=True) == root / 'tmp'
+          scratch = root / 'tmp/credentials-api-check'
+          scratch.mkdir(mode=0o700)
+          gate = pathlib.Path('gradle/publication-gates.gradle.kts').read_text()
+          imports = re.findall(r'^import (org\.gradle\.api\.(?:artifacts\.repositories|credentials)\.PasswordCredentials)$', gate, re.M)
+          assert len(imports) == 1, 'Expected the single committed credential type import'
+          (scratch / 'settings.gradle').write_text("rootProject.name = 'credentials-api-check'\n")
+          (scratch / 'build.gradle').write_text('import ' + imports[0] + '\n' + '''
+          import org.gradle.api.Action
+          import org.gradle.authentication.http.BasicAuthentication
+          plugins { id 'maven-publish' }
+          def repository = publishing.repositories.maven {
+              name = 'credentialsApiCheck'
+              url = uri('https://credentials-api.invalid/')
+              credentials(PasswordCredentials, new Action<PasswordCredentials>() {
+                  @Override void execute(PasswordCredentials value) {
+                      value.username = 'synthetic-user'
+                      value.password = 'synthetic-password'
+                  }
+              })
+              authentication.create('basic', BasicAuthentication)
+          }
+          def actual = repository.getCredentials(PasswordCredentials)
+          assert actual instanceof PasswordCredentials
+          assert actual.username == 'synthetic-user' && actual.password == 'synthetic-password'
+          assert repository.authentication.size() == 1
+          assert repository.authentication.getByName('basic') instanceof BasicAuthentication
+          println 'Pinned Gradle credential type, action and Basic authentication admitted.'
+          ''')
+          PY
+          ./gradlew --offline --no-daemon --no-parallel --max-workers=1 --console=plain \
+            --no-build-cache --no-configuration-cache \
+            '-Dorg.gradle.jvmargs=-Xmx256m -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8' \
+            -p "$KIRA_CI_ROOT/tmp/credentials-api-check" help \
+            2>&1 | tee "$KIRA_CI_ROOT/diagnostics/credentials-api.log"
 
       - name: Stop only this job's owned Gradle workers after production
         if: ${{ always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}

@@ -34,7 +34,7 @@ import org.gradle.api.attributes.AttributeContainer
 import org.gradle.api.component.ComponentWithCoordinates
 import org.gradle.api.component.ComponentWithVariants
 import org.gradle.api.component.SoftwareComponentVariant
-import org.gradle.api.credentials.PasswordCredentials
+import org.gradle.api.artifacts.repositories.PasswordCredentials
 import org.gradle.api.logging.LogLevel
 import org.gradle.api.internal.component.SoftwareComponentInternal
 import org.gradle.api.publish.PublishingExtension
