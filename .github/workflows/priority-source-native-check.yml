@@ -363,8 +363,9 @@ jobs:
           github.workflow_sha == github.sha }}
     permissions:
       contents: read
+      actions: read
     runs-on: macos-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -372,14 +373,70 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: 9af6800394af9f666463dc58ae675c293e5780a2
+          ref: 007c40b58304bdafc229fcaa08b89bc873609203
           path: producer
           fetch-depth: 0
           persist-credentials: false
-      - name: Diagnose original first Maven index; no Gradle or writer credential
+      - name: Allocate this run's private diagnostic inputs
+        id: inputs
+        run: |
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, pathlib, re
+          os.umask(0o077)
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          owner = {key: os.environ[key] for key in ('GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA')}
+          assert owner['GITHUB_REPOSITORY'] == 'kira-manga/kira-source-engine'
+          assert all(re.fullmatch(r'[1-9][0-9]*', owner[key]) for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'))
+          root = temp / ('kira-boundary-diagnostic-' + owner['GITHUB_RUN_ID'] + '-' + owner['GITHUB_RUN_ATTEMPT'])
+          root.mkdir(mode=0o700)
+          (root / 'owner.json').write_text(json.dumps(owner))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('root=' + str(root) + '\n')
+          PY
+      - name: Download only the selected genuine 0.2.3 producer archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: 39190022581
+          artifact-ids: 12159789360
+          github-token: ${{ github.token }}
+          path: ${{ steps.inputs.outputs.root }}/artifact
+          merge-multiple: true
+      - name: Diagnose original all-index and candidate-path reads; no Gradle or write credential
+        timeout-minutes: 11
         env:
+          KIRA_BOUNDARY_ROOT: ${{ steps.inputs.outputs.root }}
           KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
         run: /usr/bin/python3 -B -E -s control/.github/scripts/diagnose_native_boundary.py
+      - name: Always remove only this run's downloaded archive and scratch
+        if: ${{ always() && steps.inputs.outputs.root != '' }}
+        timeout-minutes: 1
+        env:
+          KIRA_BOUNDARY_ROOT: ${{ steps.inputs.outputs.root }}
+        run: |
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, pathlib, shutil
+          os.umask(0o077)
+          temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          root = pathlib.Path(os.environ['KIRA_BOUNDARY_ROOT'])
+          owner = {key: os.environ[key] for key in ('GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA')}
+          assert root == temp / ('kira-boundary-diagnostic-' + owner['GITHUB_RUN_ID'] + '-' + owner['GITHUB_RUN_ATTEMPT'])
+          assert not any(path.is_symlink() for path in (root, *root.parents)) and root.is_dir()
+          assert root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0
+          marker = root / 'owner.json'
+          assert not marker.is_symlink() and marker.is_file() and marker.stat().st_size <= 4096
+          assert json.loads(marker.read_text()) == owner and shutil.rmtree.avoids_symlink_attacks
+          shutil.rmtree(root)
+          assert not root.exists()
+          report = temp / 'kira-boundary-diagnostic.json'
+          assert not report.is_symlink()
+          value = {'result': 'diagnosis-not-completed'}
+          if report.exists():
+              assert report.is_file() and report.stat().st_size <= 256 * 1024
+              value = json.loads(report.read_text())
+          value['owned_download_removed'] = True
+          report.write_text(json.dumps(value, indent=2) + '\n')
+          PY
       - name: Preserve only bounded nonsecret diagnosis
         id: diagnosis
         if: always()
