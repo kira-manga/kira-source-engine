@@ -1,6 +1,8 @@
 package me.manga.kira.source.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import me.manga.kira.source.contracts.SourceChapter
 import me.manga.kira.source.contracts.SourceChapterRef
 import me.manga.kira.source.contracts.SourceChallengeListener
@@ -28,9 +30,14 @@ import me.manga.kira.source.contracts.model.TransformSpec
 import me.manga.kira.source.engine.internal.ComposedFilters
 import me.manga.kira.source.engine.internal.DateStrategies
 import me.manga.kira.source.engine.internal.Extractor
+import me.manga.kira.source.engine.internal.DilarChapterProtocol
+import me.manga.kira.source.contracts.SourceSensitiveTransport
+import me.manga.kira.source.contracts.SourceSessionCryptography
 import me.manga.kira.source.engine.internal.FilterRequestComposer
+import me.manga.kira.source.engine.internal.HttpDestination
 import me.manga.kira.source.engine.internal.ItemScope
 import me.manga.kira.source.engine.internal.JsonEscape
+import me.manga.kira.source.engine.internal.SourceHeaderPolicy
 import me.manga.kira.source.engine.internal.Templates
 import me.manga.kira.source.engine.internal.Transforms
 import me.manga.kira.source.engine.internal.UrlEncode
@@ -39,15 +46,15 @@ import me.manga.kira.source.engine.internal.UrlEncode
  * The one generic source implementation. It satisfies [SourceEngine] for ANY source whose
  * behavior can be described by a [SourceConfig] — by interpreting that config (HTTP request templates
  * + named extraction/transform/date strategies) against an injected [SourceTransport], then mapping the
- * extracted strings onto neutral contract models. It contains no source-specific code and no HTTP library.
+ * extracted strings onto neutral contract models. Special protocols are explicitly named compiled
+ * capabilities with host-supplied primitive ports; there is no HTTP library or legacy fallback.
  *
  * The generic path is the only executable source path. A failure is returned to the caller; no
  * legacy adapter is inferred. Golden-fixture tests remain the engine's behavioural specification.
  *
- * Stage-0 relative-link resolution uses the source's base URL (for Ksoup `abs:*` and [absolutize]).
- * Resolving against [SourceResponse.finalUrl] (cross-host redirects / path-relative links) is a
- * Stage-1 refinement and will land with redirect golden fixtures; until then a generic source must
- * declare a `baseUrl` that its relative links resolve against.
+ * Extracted relative links still use the source's base URL (for Ksoup `abs:*` and [absolutize]),
+ * not [SourceResponse.finalUrl]. GET redirects are resolved independently against each requested
+ * hop, with source headers selected before every send by immutable signed credential authority.
  *
  * The effective base URL is taken live from the active catalog projection through
  * [SourceBaseUrlProvider], falling back to [SourceConfig.baseUrl] when none is stored.
@@ -58,9 +65,14 @@ class GenericSourceEngine(
     private val headerStore: SourceHeaderProvider,
     private val cloudflare: SourceChallengeListener? = null,
     private val baseUrlProvider: SourceBaseUrlProvider? = null,
+    private val sensitiveHttp: SourceSensitiveTransport? = null,
+    private val sessionCryptography: SourceSessionCryptography? = null,
 ) : SourceEngine {
 
     override val api: String = config.api
+
+    private val staticHeaders = config.headers.toMap()
+    private val headerPolicy = SourceHeaderPolicy(config.baseUrl, config.imageBase, config.trustedHosts)
 
     // The live base URL for this source, resolved (once per verb, before any extraction) from
     // [baseUrlProvider]. A blank/absent override keeps the signed config value.
@@ -68,8 +80,8 @@ class GenericSourceEngine(
 
     /**
      * Refresh [effectiveBaseUrl] from the live [SourceBaseUrlProvider] before a verb's request/extraction
-     * runs. A null provider or a blank stored value keeps the frozen config baseUrl. Resolves to the same
-     * string for every verb of a source, so concurrent verbs writing it is benign.
+     * runs. A null provider or a blank stored value keeps the frozen config baseUrl. This existing
+     * extraction state is not credential authority: the actual destination is checked independently.
      */
     private suspend fun resolveEffectiveBaseUrl() {
         // The Room projection is user-editable and can contain stale values from older releases.
@@ -81,18 +93,30 @@ class GenericSourceEngine(
         effectiveBaseUrl = live ?: config.baseUrl
     }
 
-    override suspend fun home(page: Int): SourceEngineResult<List<SourceListItem>> =
+    override suspend fun home(page: Int): SourceEngineResult<List<SourceListItem>> = withFailureBoundary {
         fetchList("home", page, query = "", map = ::homeFeedItemFrom)
+    }
 
-    override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> =
-        fetchList("featured", page, query = "", map = ::featuredFrom)
+    override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> = withFailureBoundary {
+        when (val result = fetchList("featured", page, query = "", map = ::featuredFrom)) {
+            // Carousels may repeat their complete card set for seamless scrolling. Keep the first
+            // occurrence in provider order, not a hard-coded number of slides.
+            is SourceEngineResult.Success -> SourceEngineResult.Success(result.value.distinctBy { it.url })
+            is SourceEngineResult.Failure -> result
+        }
+    }
 
-    override suspend fun search(query: String, page: Int, filters: SourceFilterSelections): SourceEngineResult<List<SourceListItem>> =
+    override suspend fun search(
+        query: String,
+        page: Int,
+        filters: SourceFilterSelections,
+    ): SourceEngineResult<List<SourceListItem>> = withFailureBoundary {
         fetchList("search", page, query = query, selections = filters, map = ::homeFeedItemFrom)
+    }
 
-    override suspend fun details(manga: SourceMangaRef): SourceEngineResult<SourceDetails> {
+    override suspend fun details(manga: SourceMangaRef): SourceEngineResult<SourceDetails> = withFailureBoundary {
         val endpoint = config.endpoints["details"]
-            ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:details"))
+            ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("endpoint:details"))
         resolveEffectiveBaseUrl()
         val base = runRequest(endpoint, vars(itemUrl = manga.url)) { resp -> detailsFrom(manga, endpoint, resp.body) }
         // Some sources serve manga metadata and chapters through two distinct endpoints.
@@ -102,8 +126,8 @@ class GenericSourceEngine(
         // `listSelector`/POST_FORM all work). If the second request fails, the whole details request
         // fails instead of returning a misleading chapter-less success.
         val chaptersEndpoint = config.endpoints["chapters"]
-        if (base !is SourceEngineResult.Success || chaptersEndpoint == null) return base
-        return when (val chapters = chaptersPaginated(chaptersEndpoint, vars(itemUrl = manga.url))) {
+        if (base !is SourceEngineResult.Success || chaptersEndpoint == null) return@withFailureBoundary base
+        when (val chapters = chaptersPaginated(chaptersEndpoint, vars(itemUrl = manga.url))) {
             is SourceEngineResult.Success -> SourceEngineResult.Success(base.value.copy(chapters = chapters.value))
             is SourceEngineResult.Failure -> chapters
         }
@@ -112,14 +136,14 @@ class GenericSourceEngine(
     override suspend fun pages(
         manga: SourceMangaRef,
         chapter: SourceChapter,
-    ): SourceEngineResult<List<SourcePage>> {
+    ): SourceEngineResult<List<SourcePage>> = withFailureBoundary {
         val endpoint = config.endpoints["pages"]
-            ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:pages"))
+            ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("endpoint:pages"))
         resolveEffectiveBaseUrl()
         val pageHeaders = requestHeaders()
         // Reuse the already-read headers for the HTTP request too — pages() opens a chapter on the hot
         // path, and a second requestHeaders() would re-read persistent storage.
-        return runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders) { resp ->
+        runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders, encryptedReader = true) { resp ->
                 // Parse the (large) page body once and read both the page list and the response root off it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
                 val scopes = parsed.listScopes()
@@ -135,8 +159,11 @@ class GenericSourceEngine(
                 } else {
                     scopes
                 }
+                val htmlImages = Extractor.isHtml(endpoint)
                 ordered.mapNotNull { scope ->
-                    image(scope, "page.image", rootScope, chosenDir)?.let { SourcePage(url = it, headers = pageHeaders) }
+                    pageDestination(scope, rootScope, chosenDir, htmlImages)?.let { destination ->
+                        SourcePage(url = destination.url, headers = headerPolicy.headersFor(destination, pageHeaders))
+                    }
                 }
         }
     }
@@ -152,6 +179,7 @@ class GenericSourceEngine(
     ): SourceEngineResult<List<T>> {
         val endpoint = config.endpoints[verb]
             ?: return SourceEngineResult.Failure(SourceEngineError.Required("endpoint:$verb"))
+        if (endpoint.singlePage && page != config.pagination.start) return SourceEngineResult.Success(emptyList())
         resolveEffectiveBaseUrl()
         // Declarative filter → request mapping (CONFIG_DRIVEN_FILTERS_PLAN.md §3). Defaults apply
         // even to an empty selection; a source with no declared filters composes to EMPTY.
@@ -213,15 +241,24 @@ class GenericSourceEngine(
         vars: Map<String, String>,
         composed: ComposedFilters = ComposedFilters.EMPTY,
         precomputedHeaders: Map<String, String>? = null,
+        encryptedReader: Boolean = false,
         extract: (SourceResponse) -> T,
     ): SourceEngineResult<T> {
-        return try {
+        return withFailureBoundary {
             // Filter query pairs append AFTER template expansion (percent-encoded, ?/& aware);
             // filter headers override same-name computed headers; filter form entries append after
             // the static formBody in declaration order. All deterministic — see FilterRequestComposer.
-            val url = FilterRequestComposer.appendQueryPairs(Templates.expand(endpoint.url, vars), composed.queryPairs)
-            val headers = (precomputedHeaders ?: requestHeaders()) + composed.headerEntries
             val method = methodOf(endpoint.method)
+            val requestTemplates = listOf(endpoint.url) + when (method) {
+                SourceHttpMethod.POST_FORM -> endpoint.formBody.values
+                SourceHttpMethod.POST_JSON -> listOf(endpoint.jsonBody)
+                else -> emptyList()
+            }
+            if (requestTemplates.any { "chapterId" in Templates.references(it) } && vars["chapterId"].isNullOrEmpty()) {
+                return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("request:chapterId"))
+            }
+            val url = FilterRequestComposer.appendQueryPairs(Templates.expand(endpoint.url, vars), composed.queryPairs)
+            val headers = ((precomputedHeaders ?: requestHeaders()) + composed.headerEntries).toMap()
             val form = if (method == SourceHttpMethod.POST_FORM) {
                 endpoint.formBody.map { (key, value) -> key to Templates.expand(value, vars) } + composed.formEntries
             } else {
@@ -236,32 +273,93 @@ class GenericSourceEngine(
             } else {
                 null
             }
-            val response = http.execute(
-                SourceRequest(url = url, method = method, headers = headers, formBody = form, jsonBody = jsonBody),
-            )
-            when {
-                isCloudflareChallenge(response) -> {
-                    cloudflare?.onChallenge(config.api, url)
-                    SourceEngineResult.Failure(SourceEngineError.Http(403))
+            val response = if (endpoint.format == DilarChapterProtocol.FORMAT) {
+                if (!encryptedReader || method != SourceHttpMethod.GET || config.usesCapturedHeaders || headers.isNotEmpty()) {
+                    return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
                 }
-                response.status !in 200..299 -> SourceEngineResult.Failure(SourceEngineError.Http(response.status))
-                else -> SourceEngineResult.Success(extract(response))
+                val privateTransport = sensitiveHttp
+                    ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("capability:sensitive-transport"))
+                val cryptography = sessionCryptography
+                    ?: return@withFailureBoundary SourceEngineResult.Failure(SourceEngineError.Required("capability:session-cryptography"))
+                DilarChapterProtocol(cryptography, privateTransport).read(url, vars["id"].orEmpty())
+            } else {
+                executeWithRedirects(
+                    SourceRequest(url = url, method = method, formBody = form, jsonBody = jsonBody),
+                    headers,
+                )
             }
-        } catch (c: CancellationException) {
-            throw c
-        } catch (e: UnresolvedTemplateVarException) {
-            // A required URL-template value was empty; reject the broken-but-plausible request.
-            SourceEngineResult.Failure(SourceEngineError.Required("var:${e.field}:${e.varName}"))
-        } catch (t: Throwable) {
-            SourceEngineResult.Failure(classifyTransportError(t))
+            when (response) {
+                is SourceEngineResult.Failure -> response
+                is SourceEngineResult.Success -> SourceEngineResult.Success(extract(response.value))
+            }
         }
     }
 
     /**
-     * Bucket a non-cancellation transport/parse [Throwable] without exposing implementation details
-     * or messages across the shared contract.
+     * Public verbs include provider reads and request preparation in the typed failure contract.
+     * Individual requests reuse this boundary so their existing result-based composition is unchanged.
+     * Cancellation always escapes as the original exception.
      */
-    private fun classifyTransportError(t: Throwable): SourceEngineError {
+    private suspend fun <T> withFailureBoundary(block: suspend () -> SourceEngineResult<T>): SourceEngineResult<T> =
+        try {
+            block()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: InvalidChapterOrderException) {
+            SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+        } catch (e: UnresolvedTemplateVarException) {
+            // A required URL-template value was empty; reject the broken-but-plausible request.
+            SourceEngineResult.Failure(SourceEngineError.Required("var:${e.field}:${e.varName}"))
+        } catch (t: Throwable) {
+            SourceEngineResult.Failure(classifyError(t))
+        }
+
+    /** A transport executes one hop. Neither a prior hop nor finalUrl can authorize the next one. */
+    private suspend fun executeWithRedirects(
+        request: SourceRequest,
+        headerSnapshot: Map<String, String>,
+    ): SourceEngineResult<SourceResponse> {
+        var destination = HttpDestination.parse(request.url)
+            ?: return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+        // Ktor's default bound is twenty total sends, not twenty redirects per transport call.
+        repeat(20) {
+            currentCoroutineContext().ensureActive()
+            val response = http.execute(
+                request.copy(url = destination.url, headers = headerPolicy.headersFor(destination, headerSnapshot)),
+            )
+            currentCoroutineContext().ensureActive()
+            if (isCloudflareChallenge(response)) {
+                // Preserve the challenge signal's original logical-request URL.
+                cloudflare?.onChallenge(config.api, request.url)
+                return SourceEngineResult.Failure(SourceEngineError.Http(403))
+            }
+            if (request.method != SourceHttpMethod.GET || response.status !in GET_REDIRECT_STATUSES) {
+                return if (response.status in 200..299) {
+                    SourceEngineResult.Success(response)
+                } else {
+                    SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+                }
+            }
+            // Location is a single URI reference, not a comma-separated list. Ports must expose
+            // only one unambiguous field; also reject conflicting case-variant keys in their map.
+            val locations = response.headers.filterKeys { it.equals("Location", ignoreCase = true) }.values.distinct()
+            if (locations.isEmpty()) return SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+            if (locations.size != 1) return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+            val next = destination.resolve(locations.single())
+                ?: return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+            if (destination.scheme == "https" && next.scheme == "http") {
+                return SourceEngineResult.Failure(SourceEngineError.Http(response.status))
+            }
+            destination = next
+        }
+        return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+    }
+
+    /**
+     * Bucket a non-cancellation provider/preparation, transport or parse [Throwable] without exposing
+     * implementation details or messages across the shared contract.
+     */
+    private fun classifyError(t: Throwable): SourceEngineError {
         val raw = (t.message ?: "").lowercase()
         val causeName = t.cause?.let { it::class.simpleName.orEmpty() }.orEmpty()
         return when {
@@ -281,10 +379,11 @@ class GenericSourceEngine(
     /**
      * Static config headers, plus the per-api captured headers ONLY when [SourceConfig.usesCapturedHeaders]
      * is set. A header-free source (e.g. Azora) skips the header-store read entirely — no needless I/O
-     * or log noise on every fetch.
+     * or log noise on every fetch. Copy caller-owned inputs so a suspended request/redirect chain
+     * and its page results retain one snapshot, even if storage changes before the response arrives.
      */
     private suspend fun requestHeaders(): Map<String, String> =
-        if (config.usesCapturedHeaders) config.headers + headerStore.headersFor(config.api) else config.headers
+        if (config.usesCapturedHeaders) staticHeaders + headerStore.headersFor(config.api).toMap() else staticHeaders.toMap()
 
     private fun methodOf(method: String): SourceHttpMethod = when (method.lowercase()) {
         "post-form", "post_form", "postform" -> SourceHttpMethod.POST_FORM
@@ -331,18 +430,25 @@ class GenericSourceEngine(
      * without the field never filter. Locked chapters return empty images, so hiding them avoids a
      * dead-end blank reader.
      */
-    private fun isLockedChapter(scope: ItemScope): Boolean {
+    private fun isLockedChapter(scope: ItemScope, rootScope: ItemScope? = null): Boolean {
         if (config.fields["chapter.locked"] == null) return false
-        return text(scope, "chapter.locked").trim().lowercase() in lockedValues
+        return text(scope, "chapter.locked", rootScope).trim().lowercase() in lockedValues
     }
 
     /** Per-item recent-chapter chips: each sub-scope under `item.recentChapters` mapped via chapter.* fields. */
     private fun recentChaptersFrom(scope: ItemScope, verb: String): List<SourceChapterRef> {
         val spec = config.fields[verbKey(verb, "item.recentChapters")] ?: return emptyList()
-        return scope.children(spec).filterNot { isLockedChapter(it) }.map { ch ->
+        val chapters = scope.children(spec).filterNot { isLockedChapter(it, scope) }
+        val ordered = if ("chapter.order" in config.fields) {
+            // Resolve every required key eagerly: sorting a singleton may never invoke a selector.
+            chapters.map { it to chapterOrder(it, scope) }.sortedByDescending { it.second }.map { it.first }
+        } else {
+            chapters
+        }
+        return ordered.map { ch ->
             SourceChapterRef(
-                number = text(ch, "chapter.number"),
-                url = link(ch, "chapter.url"),
+                number = text(ch, "chapter.number", scope),
+                url = link(ch, "chapter.url", scope),
             )
         }.filter { isNavigable(it.url) }
     }
@@ -357,14 +463,11 @@ class GenericSourceEngine(
     )
 
     private fun detailsFrom(manga: SourceMangaRef, endpoint: EndpointSpec, body: String): SourceDetails {
-        val root = Extractor.rootScope(body, effectiveBaseUrl, endpoint)
-        val html = Extractor.isHtml(endpoint)
+        val parsed = Extractor.parse(body, effectiveBaseUrl, endpoint)
+        val root = parsed.rootScope()
         val chapterLocator = config.fields["detail.chapters"]
         val chapters = if (chapterLocator != null) {
-            Extractor.subScopes(body, effectiveBaseUrl, html, chapterLocator)
-                .filterNot { isLockedChapter(it) }
-                .map { chapterFrom(it) }
-                .filter { isNavigable(it.url) }
+            chapterCollectionFrom(parsed.subScopes(chapterLocator), root).orderedChapters()
         } else {
             emptyList()
         }
@@ -388,11 +491,19 @@ class GenericSourceEngine(
      * pattern). The list is located via the chapters endpoint's own `root`/`listSelector`; each element
      * is mapped through the same `chapter.*` fields + locked-filter as the inline path.
      */
-    private fun chaptersFrom(parsed: Extractor.ParsedBody): List<SourceChapter> =
-        parsed.listScopes()
-            .filterNot { isLockedChapter(it) }
-            .map { chapterFrom(it) }
-            .filter { isNavigable(it.url) }
+    private fun chaptersFrom(parsed: Extractor.ParsedBody): List<ExtractedChapter> {
+        return chapterCollectionFrom(parsed.listScopes(), parsed.rootScope())
+    }
+
+    /** Optional grouped releases: keep every child identity and its own containing group's context. */
+    private fun chapterCollectionFrom(scopes: List<ItemScope>, outer: ItemScope): List<ExtractedChapter> {
+        fun extract(children: List<ItemScope>, root: ItemScope): List<ExtractedChapter> =
+            children.filterNot { isLockedChapter(it, root) }
+                .map { chapterFrom(it, root) }
+                .filter { isNavigable(it.chapter.url) }
+        val entries = config.fields["chapter.entries"] ?: return extract(scopes, outer)
+        return scopes.flatMap { group -> extract(group.children(entries), group) }
+    }
 
     /**
      * A chapter is kept only if it has a real destination. Locked/paywalled chapters on some sites use a
@@ -407,14 +518,15 @@ class GenericSourceEngine(
      * and concatenate, deciding "is there more?" from [EndpointSpec.lastPageLocator] (a numeric pagination
      * widget → loop while page < max; or a `true`/`false` has-next flag). Mirrors the legacy multi-page
      * chapter loops (Team X HTML pagination, Tapas JSON `has_next`). With no `pageParam` it is a single
-     * fetch (the original separated-details behavior). A page-1 failure fails the whole call (→ details
-     * fails → fallback); a later-page failure stops with what was gathered.
+     * fetch (the original separated-details behavior). A failure on any required page fails the whole
+     * details call rather than returning the chapters gathered so far as a complete result.
      */
     private suspend fun chaptersPaginated(endpoint: EndpointSpec, baseVars: Map<String, String>): SourceEngineResult<List<SourceChapter>> {
+        if (endpoint.pageParam == "chapterId") return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
         if (endpoint.pageParam.isEmpty()) {
-            return runRequest(endpoint, baseVars) { resp -> chaptersFrom(Extractor.parse(resp.body, effectiveBaseUrl, endpoint)) }
+            return runRequest(endpoint, baseVars) { resp -> chaptersFrom(Extractor.parse(resp.body, effectiveBaseUrl, endpoint)).orderedChapters() }
         }
-        val all = mutableListOf<SourceChapter>()
+        val all = mutableListOf<ExtractedChapter>()
         var page = 1
         var maxPage = Int.MAX_VALUE
         val safetyCap = 200
@@ -423,21 +535,30 @@ class GenericSourceEngine(
             val res = runRequest(endpoint, pageVars) { resp ->
                 // Parse each chapters page once; the chapter list and the pagination locator both read it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
-                chaptersFrom(parsed) to paginationState(parsed, endpoint, page)
+                val groups = parsed.listScopes()
+                val chapters = chapterCollectionFrom(groups, parsed.rootScope())
+                // A nonempty grouped page may contain only empty/locked release collections.
+                // That does not terminate an explicitly continuing feed. Keep the existing true
+                // empty-page sentinel, and the unchanged mapped-empty behavior for flat sources.
+                val terminalEmpty = if ("chapter.entries" in config.fields) groups.isEmpty() else chapters.isEmpty()
+                Triple(chapters, paginationState(parsed, endpoint, page), terminalEmpty)
             }
             when (res) {
-                is SourceEngineResult.Failure -> return if (page == 1) res else SourceEngineResult.Success(all)
+                is SourceEngineResult.Failure -> return res
                 is SourceEngineResult.Success -> {
-                    val (chs, state) = res.value
-                    if (chs.isEmpty() && page > 1) break
+                    val (chs, state, terminalEmpty) = res.value
+                    if (terminalEmpty && page > 1) break
                     all += chs
                     state.maxPage?.let { maxPage = it }
                     if (!state.hasNext) break
+                    // The bound limits work, not the source's chapter count. If more are required,
+                    // returning the accumulated prefix as a complete list would silently lose data.
+                    if (page == safetyCap) return SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
                     page++
                 }
             }
         }
-        return SourceEngineResult.Success(all)
+        return SourceEngineResult.Success(all.orderedChapters())
     }
 
     private data class PageState(val hasNext: Boolean, val maxPage: Int?)
@@ -460,21 +581,37 @@ class GenericSourceEngine(
         return PageState(hasNext = true, maxPage = null)
     }
 
-    private fun chapterFrom(scope: ItemScope): SourceChapter = SourceChapter(
-        number = text(scope, "chapter.number"),
-        name = text(scope, "chapter.name"),
-        url = link(scope, "chapter.url"),
-        date = config.fields["chapter.date"]?.let { spec ->
-            scope.field(spec)?.let { DateStrategies.parse(Transforms.apply(it, spec.transform), spec.dateStrategy) }
-        },
+    private data class ExtractedChapter(val chapter: SourceChapter, val order: Double?)
+    private class InvalidChapterOrderException : Exception()
+
+    /** Optional numeric newest-first order. Missing/malformed values must not silently become zero. */
+    private fun chapterOrder(scope: ItemScope, rootScope: ItemScope): Double? {
+        if ("chapter.order" !in config.fields) return null
+        return text(scope, "chapter.order", rootScope).toDoubleOrNull()?.takeIf { it.isFinite() }
+            ?: throw InvalidChapterOrderException()
+    }
+
+    private fun List<ExtractedChapter>.orderedChapters(): List<SourceChapter> =
+        (if ("chapter.order" in config.fields) sortedByDescending { it.order } else this).map { it.chapter }
+
+    private fun chapterFrom(scope: ItemScope, rootScope: ItemScope): ExtractedChapter = ExtractedChapter(
+        chapter = SourceChapter(
+            number = text(scope, "chapter.number", rootScope),
+            name = text(scope, "chapter.name", rootScope),
+            url = link(scope, "chapter.url", rootScope),
+            date = config.fields["chapter.date"]?.let { spec ->
+                scope.field(spec)?.let { DateStrategies.parse(Transforms.apply(it, spec.transform), spec.dateStrategy) }
+            },
+        ),
+        order = chapterOrder(scope, rootScope),
     )
 
     // --- field helpers ----------------------------------------------------------------------------
 
     /** Extract + transform a scalar text field; "" if absent. */
-    private fun text(scope: ItemScope, key: String): String {
+    private fun text(scope: ItemScope, key: String, rootScope: ItemScope? = null): String {
         val spec = config.fields[key] ?: return ""
-        return resolveField(scope, key, spec)
+        return resolveField(scope, key, spec, rootScope)
     }
 
     /**
@@ -527,8 +664,9 @@ class GenericSourceEngine(
             val isDirToken = loc0 == "root:__dir"
             val resolved = when {
                 isDirToken -> chosenDir
-                // `root:<path>` → resolve against the RESPONSE root (a sibling of the per-page array),
-                // e.g. DilarV2's page image needs the root-level `storage_key`.
+                // Pages: response root. Chapters: the object containing the chapter collection
+                // (response root for details/chapters, parent feed item for recent chapters).
+                // This scope is passed by value through extraction, never stored between requests.
                 loc0.startsWith("root:") -> rootScope?.raw(loc0.removePrefix("root:").trim()).orEmpty()
                 // Otherwise resolve against the per-item scope. The locator may list COMMA-separated
                 // fallback locators (first non-empty wins) — lets one var span sources whose field name
@@ -551,7 +689,7 @@ class GenericSourceEngine(
 
     /**
      * A required template var resolved to nothing. Thrown from [fieldVars] when a URL field's template
-     * references a var whose response locator is empty; caught in [runRequest] and mapped to
+     * references a var whose response locator is empty; caught in [withFailureBoundary] and mapped to
      * [SourceEngineError.Required] so the verb fails rather than emitting a plausible-but-wrong
      * URL. Carries no `cause` — it is a deliberate fail-closed signal, not a transport failure.
      */
@@ -580,9 +718,9 @@ class GenericSourceEngine(
     }
 
     /** A link field, absolutised against the live base URL. Resolves strict (a broken URL must fail-close). */
-    private fun link(scope: ItemScope, key: String): String {
+    private fun link(scope: ItemScope, key: String, rootScope: ItemScope? = null): String {
         val spec = config.fields[key] ?: return ""
-        return absolutize(resolveField(scope, key, spec, strict = true), effectiveBaseUrl)
+        return absolutize(resolveField(scope, key, spec, rootScope, strict = true), effectiveBaseUrl)
     }
 
     /** An image field, absolutised against [SourceConfig.imageBase] (falling back to the live base); null if absent. */
@@ -590,6 +728,27 @@ class GenericSourceEngine(
         val spec = config.fields[key] ?: return null
         val value = resolveField(scope, key, spec, rootScope, chosenDir, strict = true).takeIf { it.isNotEmpty() } ?: return null
         return absolutize(value, config.imageBase.ifEmpty { effectiveBaseUrl })
+    }
+
+    /** Only extracted HTML path spaces are accommodated; URI and credential guards remain strict. */
+    private fun pageDestination(
+        scope: ItemScope,
+        rootScope: ItemScope,
+        chosenDir: String,
+        htmlImages: Boolean,
+    ): HttpDestination? {
+        val spec = config.fields["page.image"] ?: return null
+        val extracted = resolveField(scope, "page.image", spec, rootScope, chosenDir, strict = true)
+        val value = if (htmlImages && spec.template.isEmpty()) {
+            HttpDestination.encodeExtractedImagePathSpaces(extracted)
+        } else extracted
+        if (value.isEmpty() || !HttpDestination.isSafeImageReference(value)) return null
+        val url = if (value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)) {
+            value
+        } else {
+            absolutize(value, config.imageBase.ifEmpty { effectiveBaseUrl })
+        }
+        return HttpDestination.parse(url)
     }
 
     private fun ratingInt(value: String): Int? =
@@ -619,6 +778,11 @@ class GenericSourceEngine(
         "queryJson" to JsonEscape.escape(query),
         "itemUrl" to itemUrl,
         "chapterUrl" to chapterUrl,
+        "chapterId" to HttpDestination.parse(chapterUrl)?.lastPathSegment().orEmpty(),
         "id" to itemUrl.trimEnd('/').substringAfterLast('/'),
     )
+
+    private companion object {
+        val GET_REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
+    }
 }

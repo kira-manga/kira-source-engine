@@ -15,6 +15,10 @@ import kotlinx.serialization.json.JsonPrimitive
  *  - `a[0]`             → array element by index
  *  - `a[*]`             → every element of an array (fan-out)
  *
+ * Object-key segments are literal (including non-ASCII/punctuation keys), not expressions or
+ * object wildcards. Only the bracket accessor performs array indexing/fan-out. Existing single
+ * leading/trailing-dot and signed/zero-padded nonnegative-index aliases remain supported.
+ *
  * Anything else (filters, recursive descent `..`, slices) is intentionally unsupported; the
  * validator should reject configs that need more than this until the engine grows real support.
  * Stage-0 leans on this only for golden-fixture JSON sources.
@@ -26,13 +30,10 @@ internal object JsonPath {
      * a `[*]` segment fans out. Used both for list roots and for scalar field extraction (take first).
      */
     fun resolve(root: JsonElement, path: String): List<JsonElement> {
-        val clean = path.trim().removePrefix("$").removePrefix(".")
-        if (clean.isEmpty()) return listOf(root)
+        val segments = parse(path) ?: return emptyList()
 
         var current: List<JsonElement> = listOf(root)
-        for (segment in clean.split('.')) {
-            if (segment.isEmpty()) continue
-            val (name, accessor) = parseSegment(segment)
+        for ((name, accessor) in segments) {
             val next = ArrayList<JsonElement>()
             for (node in current) {
                 val child = if (name.isEmpty()) node else (node as? JsonObject)?.get(name) ?: continue
@@ -56,14 +57,34 @@ internal object JsonPath {
     fun stringList(root: JsonElement, path: String): List<String> =
         resolve(root, path).mapNotNull { it.asStringOrNull() }
 
-    private fun parseSegment(segment: String): Pair<String, Accessor> {
+    /** Validation and execution consume the same subset, including the existing prefix/index aliases. */
+    fun isSupported(path: String): Boolean = parse(path) != null
+
+    private fun parse(path: String): List<Pair<String, Accessor>>? {
+        val unprefixed = path.trim().removePrefix("$")
+        // Empty segments inside a path resemble recursive descent, which we do not implement.
+        if (unprefixed.contains("..")) return null
+        val clean = unprefixed.removePrefix(".").removeSuffix(".")
+        if (clean.isEmpty()) return emptyList()
+        val segments = mutableListOf<Pair<String, Accessor>>()
+        for (segment in clean.split('.')) {
+            segments += parseSegment(segment) ?: return null
+        }
+        return segments
+    }
+
+    private fun parseSegment(segment: String): Pair<String, Accessor>? {
         val bracket = segment.indexOf('[')
         if (bracket < 0) return segment to Accessor.None
         val name = segment.substring(0, bracket)
-        val inside = segment.substring(bracket + 1, segment.indexOf(']', bracket).let { if (it < 0) segment.length else it })
+        val close = segment.indexOf(']', bracket)
+        // No truncated accessor, ignored suffix, quoted-key/filter/slice/union, or chained brackets.
+        if (close != segment.lastIndex) return null
+        val inside = segment.substring(bracket + 1, close)
         val accessor = when {
             inside == "*" -> Accessor.All
-            else -> inside.toIntOrNull()?.let { Accessor.Index(it) } ?: Accessor.None
+            // toIntOrNull deliberately preserves +1, 01 and -0 aliases; negative indices never resolve.
+            else -> inside.toIntOrNull()?.takeIf { it >= 0 }?.let { Accessor.Index(it) } ?: return null
         }
         return name to accessor
     }

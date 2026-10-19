@@ -56,7 +56,7 @@ data class SourceConfig(
     val engine: String = "legacy",
     /** Declared minimum app version. Reserved for a Stage-1 version gate; NOT enforced by the engine yet. */
     val minAppVersion: String? = null,
-    /** Static headers merged under any per-source captured headers (referer/UA/etc.). */
+    /** Static headers merged under captured headers; the whole source map is destination-confined. */
     val headers: Map<String, String> = emptyMap(),
     /**
      * Whether the engine reads the per-api captured-header store (cookies/UA/Cloudflare clearance)
@@ -106,6 +106,12 @@ data class SourceConfig(
      * Extra bare hosts trusted for this api in the push deep-link gate beyond
      * baseUrl/imageBase/[previousHosts] (e.g. an image CDN on an unrelated domain) (R7).
      * Trust-only — never drives migration.
+     *
+     * Also authorizes source-derived request/page headers for that exact host on HTTPS port 443
+     * only. Credential matching uses conservative ASCII DNS/IP spelling, not deep-link suffix or
+     * history rules; no implicit subdomains, alternate ports, Unicode/trailing-dot aliases or HTTP.
+     * Other credential origins come only from signed [baseUrl]/[imageBase] (an HTTP image origin
+     * requires an HTTP base). User-selected mirrors and historical hosts add no credential trust.
      */
     val trustedHosts: List<String> = emptyList(),
     /**
@@ -154,6 +160,8 @@ data class PaginationSpec(
 /**
  * One request template + how to find the result list in the response. [url] is a template with
  * `{baseUrl}`, `{imageBase}`, `{page}`, `{query}`, `{itemUrl}`, `{chapterUrl}`, `{id}` placeholders.
+ * Pages also supply `{chapterId}`: the encoded last path segment of a valid HTTP(S) chapter URL,
+ * ignoring query, fragment and trailing slashes. It is not the manga `{id}`; missing identity fails.
  * For JSON responses [root] is the JSONPath to the array; for HTML [listSelector] is the CSS
  * selector matching each item element.
  */
@@ -161,7 +169,11 @@ data class PaginationSpec(
 data class EndpointSpec(
     val url: String,
     val method: String = "get",
-    /** `"json"` | `"html"` | `"script-json"` | `""` (infer: html iff [listSelector] is set, else json). */
+    /**
+     * `"json"` | `"html"` | `"script-json"` | `""` (infer: html iff [listSelector] is set, else json).
+     * `"dilar-ecies-v16"` is a pages-only compiled protocol, requiring explicit private transport
+     * and crypto ports. It returns normalized `pages[{url,order}]`; older validators reject it.
+     */
     val format: String = "",
     /** For `format = "script-json"`: the `<script id="…">` whose JSON body is parsed (default `__NEXT_DATA__`). */
     val scriptId: String = "",
@@ -191,6 +203,11 @@ data class EndpointSpec(
      * JSON `has_next`; loop while true).
      */
     val lastPageLocator: String = "",
+    /**
+     * A finite `home`, `featured` or `search` feed: request only [PaginationSpec.start]. Other
+     * pages return an empty list without IO. False preserves existing template-driven pagination.
+     */
+    val singlePage: Boolean = false,
 )
 
 /**
@@ -212,6 +229,11 @@ data class FilterSpec(
  * (JSONPath) or [selector] (CSS) is the primary locator; the other family's fields are ignored.
  * [transform] applies an ordered chain of named, generic transforms (coalesce, regex-replace,
  * enum-map, strip-html, date-parse, …) that the engine resolves by name.
+ * Optional `chapter.order` supplies a finite numeric newest-first sort key. Ordering is stable for
+ * ties and applies across the full fetched chapter list; absent preserves provider order. Malformed
+ * required sort keys fail the operation rather than silently becoming zero. Chapter URLs stay IDs.
+ * Optional `chapter.entries` locates releases inside each inline/dedicated chapter group. Every
+ * release is mapped; `root:` vars then refer to its containing group, never a first-release shortcut.
  */
 @Serializable
 data class FieldSpec(
@@ -222,6 +244,12 @@ data class FieldSpec(
     val fallbackSelectors: List<String> = emptyList(),
     val lazyAttrChain: List<String> = emptyList(),
     val template: String = "",
+    /**
+     * Named locator/transform expressions, not scripts. `root:path` on page.image reads the response
+     * root. On chapter scalar templates it reads the outer chapter-collection scope: response root
+     * for inline/separate chapters, parent feed item for recent chapters. Other fields have no root.
+     * `root:__dir` retains its existing page-root-directory meaning (empty in other contexts).
+     */
     val vars: Map<String, String> = emptyMap(),
     val listPath: String = "",
     val listSelector: String = "",

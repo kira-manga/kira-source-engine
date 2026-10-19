@@ -1,0 +1,779 @@
+"""Actual caller/HTTP/byte composition; synthetic Git/native/policy facts, no approval evidence."""
+
+import copy
+from contextlib import redirect_stderr
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from unittest import mock
+import unittest
+
+import github_publication_receipts as receipts
+import publication_policy as policy
+import publisher_publication_intake as publisher
+import test_connected_publication_intake as connected_fixtures
+import test_github_branch_bypass_proof as bypass_fixtures
+import test_github_publication_receipts as http_fixtures
+import test_publication_policy as fixtures
+import test_remote_maven_readback as registry_fixtures
+
+
+def selected_window(producer, invocation, protection):
+    now = int(time.time())
+    return {"not_before": now - 60, "expires_at": now + 3600,
+            "owner": {"id": protection["environment"]["reviewer_ids"][0], "login": "synthetic-owner"},
+            "disabled_workflow_ids": [producer["workflow_id"]],
+            "packages": registry_fixtures.selected_packages(invocation["repository_id"])}
+
+
+def window_values(selection, completed=()):
+    window, invocation = selection["release_window"], selection["publisher"]
+    values = [[window["owner"] | {"type": "User", "permissions": {"admin": True}}], [],
+              {"default_workflow_permissions": "read"},
+              {"total_count": 2, "workflows": [
+                  {"id": selection["producer"]["workflow_id"], "path": policy.WORKFLOW, "state": "disabled_manually"},
+                  {"id": invocation["workflow_id"], "path": receipts.PUBLISHER_WORKFLOW, "state": "active"}]}]
+    values += [{"total_count": 0, "workflow_runs": []} for _ in range(4)]
+    values += [{"total_count": 1, "workflow_runs": [http_fixtures.publisher_policy_values(
+        invocation, selection["protection"])[0]]}]
+    return values + registry_fixtures.registry_values(window["packages"], completed, selection["producer"]["version"])
+
+
+class PublisherIntakeTests(fixtures.OwnedFixture):
+    # Reuse boundary fixture helpers, not inherited test methods or supplied intake PASSs.
+    patch = connected_fixtures.ConnectedIntakeTests.patch
+    native_phase = connected_fixtures.ConnectedIntakeTests.native_phase
+    connect = connected_fixtures.ConnectedIntakeTests.connect
+    close_responses = connected_fixtures.ConnectedIntakeTests.close_responses
+    assert_cleaned = connected_fixtures.ConnectedIntakeTests.assert_cleaned
+
+    def setUp(self):
+        fixtures.OwnedFixture.setUp(self)
+        self.archive_path, files = self.archive()
+        self.checkout = fixtures.SourceAgreementTests.checkout(self)
+        measured, self.metadata = policy.archive_intake(self.archive_path, fixtures.RELEASE, files)
+        producer = fixtures.expected() | measured | {"workflow_sha256": files[policy.WORKFLOW]["sha256"]}
+        invocation, protection = http_fixtures.publisher_selection()
+        self.selection = {"producer": producer, "publisher": invocation, "protection": protection,
+                          "app_parity_ref": "synthetic-app-parity-receipt-sha256:" + "1" * 64,
+                          "backend_parity_ref": "synthetic-backend-parity-receipt-sha256:" + "2" * 64,
+                          "release_window": selected_window(producer, invocation, protection)}
+        self.native_asset = self.root / "not-acquired-gh-asset"
+        self.attestation = self.root / "not-signed.json"
+        self.events, self.inventory_paths, self.connections, self.requests, self.responses = [], [], [], [], []
+        self.native_selection = self.after_native = self.on_request = None
+        self.reset_responses()
+        self.addCleanup(self.close_responses)
+        original_source, original_archive = policy.source_snapshot, policy.archive_intake
+
+        def source(*args, **kwargs):
+            self.events.append("source")
+            return original_source(*args, **kwargs)
+
+        def archive(*args, **kwargs):
+            self.events.append("archive")
+            return original_archive(*args, **kwargs)
+
+        self.source = self.patch(policy, "source_snapshot", side_effect=source)
+        self.archive_check = self.patch(policy, "archive_intake", side_effect=archive)
+        self.native = self.patch(policy, "native_verify", side_effect=self.native_phase)
+        self.http = self.patch(receipts.http.client, "HTTPSConnection", side_effect=self.connect)
+        self.lineage = self.patch(policy, "release_lineage", side_effect=self.lineage_phase)
+
+    def reset_responses(self, policy_values=None, producer_values=None):
+        self.close_responses()
+        producer_values = fixtures.receipts() if producer_values is None else producer_values
+        policy_values = http_fixtures.publisher_policy_values() if policy_values is None else policy_values
+        self.responses = [http_fixtures.Response(producer_values[key]) for key in ("attempt", "jobs", "artifact", "current")]
+        self.responses.extend(http_fixtures.Response(value) for value in policy_values)
+        self.connections.clear()
+        self.requests.clear()
+
+    def lineage_phase(self, root, **selection):
+        self.events.append("lineage")
+        self.assertEqual(root, self.checkout)
+        self.assertEqual(selection, {"version": fixtures.RELEASE, "tag": "v1.2.3", "source_sha": fixtures.SHA,
+                                     "source_tree": fixtures.TREE, "tag_object": "9" * 40, "branch_tip": "e" * 40})
+        return {"scope": "synthetic-local-lineage-observation-only", **selection,
+                "hold": "stage-c-authority-and-live-rechecks-required"}
+
+    def preflight(self, token=None):
+        return publisher.publisher_preflight(self.checkout, self.selection, self.archive_path,
+                                             self.native_asset, self.attestation, token=token)
+
+    def recheck(self, before, token=None):
+        return publisher.publisher_recheck(self.checkout, self.selection, before, self.archive_path,
+                                           self.native_asset, self.attestation, token=token)
+
+    def assert_refused(self, phase="preflight", before=None, token=None):
+        with self.assertRaises(policy.Refusal) as caught:
+            self.preflight(token) if phase == "preflight" else self.recheck(before, token)
+        self.assertEqual(str(caught.exception), "Publisher " + phase + " refused")
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assert_cleaned()
+
+    def test_preflight_uses_real_connected_intake_before_policy_then_final_bytes_and_lineage(self):
+        result = self.preflight()
+        first_http = ["http:" + path for path in connected_fixtures.HTTP_PATHS]
+        policy_http = ["http:" + path for _, path, _ in self.requests[4:]]
+        self.assertEqual(self.events, ["source", "archive", "native"] + first_http + ["source", "archive"]
+                         + policy_http + ["source", "archive", "lineage"])
+        self.assertEqual(len(self.requests), 14)
+        self.assertEqual(result["selection"], self.selection)
+        self.assertEqual(result["observations"]["publisher"]["run_id"], 61)
+        self.assertEqual(result["selection"]["producer"]["run_id"], 31)
+        self.assertEqual(result["lineage"]["hold"], "stage-c-authority-and-live-rechecks-required")
+        self.assertNotIn("approved", json.dumps(result))
+        self.native.assert_called_once()
+        self.assert_cleaned()
+
+    def test_recheck_repeats_native_all_gets_and_final_rereads_without_reusing_pass(self):
+        before = self.preflight()
+        original = copy.deepcopy(before)
+        self.assert_cleaned()
+        self.reset_responses()
+        self.events.clear()
+        # The input projection is copied before callbacks; callers cannot change its comparison mid-read.
+        self.on_request = lambda _: before["selection"].update(app_parity_ref="changed-during-recheck")
+        result = self.recheck(before)
+        self.assertEqual(result, original)
+        self.assertEqual(len(self.requests), 14)
+        self.assertEqual(self.native.call_count, 2)
+        self.assertEqual(self.source.call_count, 6)
+        self.assertEqual(self.archive_check.call_count, 6)
+        self.assertEqual(self.lineage.call_count, 2)
+        self.assert_cleaned()
+
+    def test_recheck_reacquires_each_bypass_proof_and_binds_selected_rule_ids(self):
+        protection = self.selection["protection"]
+        bypass_fixtures.select_rule_ids(protection)
+        values = bypass_fixtures.bypass_values(self.selection["publisher"], protection)
+        self.reset_responses(values)
+        before = self.preflight(bypass_fixtures.TOKEN)
+        self.assertEqual(before["selection"]["protection"], protection)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assert_cleaned()
+        self.reset_responses(values)
+        self.assertEqual(self.recheck(before, bypass_fixtures.TOKEN), before)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assertEqual(self.native.call_count, 2)
+        self.assert_cleaned()
+        # New live zero-bypass proof is not enough if independently selected rule identity changed.
+        protection["branches"][0]["bypass_rule_id"] = "BPR_synthetic_replacement"
+        values = bypass_fixtures.bypass_values(self.selection["publisher"], protection)
+        self.reset_responses(values)
+        self.assert_refused("recheck", before, bypass_fixtures.TOKEN)
+        self.assertEqual(sum(method == "POST" for method, _, _ in self.requests), 2)
+        self.assertEqual(self.native.call_count, 3)
+        self.assertEqual(self.lineage.call_count, 3)
+        self.assertNotIn(bypass_fixtures.TOKEN, repr(self.native.call_args))
+        self.assertNotIn(bypass_fixtures.TOKEN, repr(self.lineage.call_args))
+
+    def test_selection_is_deep_copied_and_read_token_reaches_only_official_gets(self):
+        original = copy.deepcopy(self.selection)
+
+        def mutate():
+            self.selection["producer"]["run_attempt"] = 99
+            self.selection["publisher"]["run_id"] = 999
+            self.selection["protection"]["environment"]["reviewer_ids"].append(999)
+            self.selection["protection"]["branches"][0]["checks"][0]["app_id"] = 999
+            self.selection["app_parity_ref"] = "changed"
+
+        self.after_native = mutate
+        token = "synthetic_SECRET_read_token"
+        result = self.preflight(token)
+        self.assertEqual(result["selection"], original)
+        self.assertEqual(self.native_selection, original["producer"])
+        self.assertNotIn(token, repr(self.native.call_args))
+        self.assertNotIn(token, repr(self.lineage.call_args))
+        self.assertNotIn(token, json.dumps(result))
+        self.assertTrue(all(kwargs["headers"]["Authorization"] == "Bearer " + token for _, _, kwargs in self.requests))
+        self.assert_cleaned()
+
+    def test_missing_selection_parity_or_separate_publisher_refuses_before_work(self):
+        original = copy.deepcopy(self.selection)
+        cases = [None, original | {"app_parity_ref": ""}, original | {"backend_parity_ref": None},
+                 original | {"app_parity_ref": "x" * 1025}, original | {"unknown": "untrusted"},
+                 original | {"producer": original["producer"] | {"secret": "untrusted"}},
+                 original | {"publisher": original["publisher"] | {"run_id": 31}},
+                 original | {"publisher": original["publisher"] | {"workflow_id": 17}},
+                 original | {"publisher": original["publisher"] | {"run_attempt": 2}}]
+        for index, selection in enumerate(cases):
+            with self.subTest(index=index):
+                self.selection = selection
+                self.assert_refused()
+        self.selection = original
+        self.assert_refused(token="synthetic\r\nSECRET")
+        self.assert_refused(phase="recheck", before={"approved": True})
+        self.assertEqual(self.events, [])
+        self.native.assert_not_called()
+        self.http.assert_not_called()
+
+    def test_recheck_refuses_changed_policy_even_with_successful_candidate_intake(self):
+        before = self.preflight()
+        self.assert_cleaned()
+        values = http_fixtures.publisher_policy_values()
+        values[3]["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 83
+        self.reset_responses(values)
+        self.events.clear()
+        self.assert_refused("recheck", before)
+        self.assertEqual(self.native.call_count, 2)
+        self.assertEqual(len(self.requests), 8)
+        self.assertEqual(self.lineage.call_count, 1)
+
+    def test_changed_parity_binding_cannot_reuse_a_preflight_projection(self):
+        before = self.preflight()
+        self.assert_cleaned()
+        self.reset_responses()
+        self.selection["backend_parity_ref"] = "different-independent-parity-reference"
+        self.assert_refused("recheck", before)
+        self.assertEqual(self.native.call_count, 2)
+        self.assertEqual(len(self.requests), 14)
+        self.assertEqual(self.lineage.call_count, 2)
+
+    def test_producer_supersession_or_publisher_completion_cannot_reuse_candidate_success(self):
+        before = self.preflight()
+        self.assert_cleaned()
+        producer_values = fixtures.receipts()
+        producer_values["current"]["run_attempt"] = 3
+        self.reset_responses(producer_values=producer_values)
+        self.assert_refused("recheck", before)
+        self.assertEqual(len(self.requests), 4)
+        values = http_fixtures.publisher_policy_values()
+        values[-1].update(status="completed", conclusion="success")
+        self.reset_responses(values)
+        self.assert_refused("recheck", before)
+        self.assertEqual(len(self.requests), 14)
+        self.assertEqual(self.native.call_count, 3)
+        self.assertEqual(self.lineage.call_count, 1)
+
+    def test_policy_get_mutation_of_local_source_or_archive_fails_final_reread(self):
+        source_path = self.checkout / policy.WORKFLOW
+        original_source, original_archive = source_path.read_bytes(), self.archive_path.read_bytes()
+        for kind in ("source", "archive"):
+            with self.subTest(kind=kind):
+                source_path.write_bytes(original_source)
+                self.archive_path.write_bytes(original_archive)
+                self.reset_responses()
+                self.events.clear()
+
+                def mutate(path):
+                    if path.endswith("/actions/runs/61"):
+                        target = source_path if kind == "source" else self.archive_path
+                        with target.open("ab") as stream:
+                            stream.write(b"changed-during-policy-http")
+
+                self.on_request = mutate
+                self.assert_refused()
+                self.assertEqual(len(self.requests), 14)
+                self.assertEqual(self.events[-1], kind)
+        self.lineage.assert_not_called()
+
+    def test_local_lineage_failure_is_not_satisfied_by_equal_remote_sha_strings(self):
+        self.lineage.side_effect = policy.Refusal("synthetic_PRIVATE_missing_ancestor")
+        self.assert_refused()
+        self.assertEqual(len(self.requests), 14)
+        self.native.assert_called_once()
+
+    def test_provider_or_native_error_is_content_free_and_owned_resources_close(self):
+        self.native.side_effect = OSError("synthetic_SECRET_native_output")
+        self.assert_refused(token="synthetic_SECRET_token")
+        self.assertFalse(self.native.call_args.args[2][1].parent.exists())
+        self.http.assert_not_called()
+        self.native.side_effect = self.native_phase
+        self.http.side_effect = OSError("synthetic_SECRET_provider_output")
+        self.assert_refused(token="synthetic_SECRET_token")
+        self.assertEqual(self.native.call_count, 2)
+        self.lineage.assert_not_called()
+
+
+class PublisherWriterBoundaryTests(fixtures.OwnedFixture):
+    # Reuse owned fixture setup only; don't rerun the prior eleven intake tests.
+    setUp = PublisherIntakeTests.setUp
+    patch = PublisherIntakeTests.patch
+    native_phase = PublisherIntakeTests.native_phase
+    connect = PublisherIntakeTests.connect
+    close_responses = PublisherIntakeTests.close_responses
+    assert_cleaned = PublisherIntakeTests.assert_cleaned
+    reset_responses = PublisherIntakeTests.reset_responses
+    lineage_phase = PublisherIntakeTests.lineage_phase
+    preflight = PublisherIntakeTests.preflight
+
+    def admitted(self):
+        before = self.preflight()
+        self.reset_responses()
+        self.events.clear()
+        self.native.reset_mock()
+        self.source.reset_mock()
+        self.archive_check.reset_mock()
+        (self.checkout / "build").mkdir()
+        return before
+
+    def late(self, before, token=None):
+        return publisher.publisher_writer_recheck(self.checkout, self.selection, before, self.archive_path, token=token)
+
+    def test_late_rechecks_source_archive_and_all_official_facts_without_reusing_native_or_fresh_intake(self):
+        before = self.admitted()
+        self.assertEqual(self.late(before, "synthetic_read_only"), before)
+        self.assertEqual(len(self.requests), 14)
+        self.assertEqual(self.events[:2], ["source", "archive"])
+        self.assertEqual(self.events[-3:], ["source", "archive", "lineage"])
+        self.assertEqual([call.kwargs for call in self.source.call_args_list], [{"fresh": False}] * 2)
+        self.native.assert_not_called()
+        self.assertNotIn("synthetic_read_only", repr(self.lineage.call_args))
+        self.assert_cleaned()
+        self.reset_responses()
+        with self.assertRaisesRegex(policy.Refusal, "^Publisher recheck refused$"):
+            publisher.publisher_recheck(self.checkout, self.selection, before, self.archive_path,
+                                        self.native_asset, self.attestation)
+        self.assertEqual(self.requests, [])  # Full preflight/recheck still require a fresh checkout.
+        self.native.assert_not_called()
+
+    def test_late_owns_projection_and_selection_before_mutable_http_callbacks(self):
+        before = self.admitted()
+        expected = copy.deepcopy(before)
+
+        def mutate(_):
+            before["selection"]["app_parity_ref"] = "changed-after-copy"
+            self.selection["publisher"]["run_id"] = 999
+            self.selection["protection"]["environment"]["reviewer_ids"].append(999)
+
+        self.on_request = mutate
+        self.assertEqual(self.late(before), expected)
+        self.native.assert_not_called()
+        self.assert_cleaned()
+
+    def test_late_refuses_superseded_producer_completed_publisher_and_changed_parity(self):
+        before = self.admitted()
+        original = copy.deepcopy(self.selection)
+        for kind in ("producer", "publisher", "parity"):
+            with self.subTest(kind=kind):
+                self.selection = copy.deepcopy(original)
+                producer_values = fixtures.receipts()
+                policy_values = http_fixtures.publisher_policy_values()
+                if kind == "producer":
+                    producer_values["current"]["run_attempt"] = 3
+                elif kind == "publisher":
+                    policy_values[-1].update(status="completed", conclusion="success")
+                else:
+                    self.selection["app_parity_ref"] = "different-qualified-evidence-reference"
+                self.reset_responses(policy_values, producer_values)
+                with self.assertRaisesRegex(policy.Refusal, "^Publisher writer recheck refused$"):
+                    self.late(before)
+                self.native.assert_not_called()
+                self.assert_cleaned()
+
+    def test_late_refuses_source_archive_mutation_and_unmodeled_source_addition(self):
+        before = self.admitted()
+        source = self.checkout / policy.WORKFLOW
+        original_source, original_archive = source.read_bytes(), self.archive_path.read_bytes()
+        for kind in ("source", "archive"):
+            with self.subTest(kind=kind):
+                source.write_bytes(original_source)
+                self.archive_path.write_bytes(original_archive)
+                self.reset_responses()
+
+                def mutate(path):
+                    if path.endswith("/actions/runs/61"):
+                        with (source if kind == "source" else self.archive_path).open("ab") as stream:
+                            stream.write(b"changed-at-writer-boundary")
+
+                self.on_request = mutate
+                with self.assertRaisesRegex(policy.Refusal, "^Publisher writer recheck refused$"):
+                    self.late(before)
+                self.assert_cleaned()
+        source.write_bytes(original_source)
+        self.archive_path.write_bytes(original_archive)
+        (self.checkout / "unmodeled.txt").write_text("not a generated output")
+        self.reset_responses()
+        with self.assertRaisesRegex(policy.Refusal, "^Publisher writer recheck refused$"):
+            self.late(before)
+        self.assertEqual(self.requests, [])
+
+    def request(self, before):
+        invocation = self.selection["publisher"]
+        context_fields = {"GITHUB_REPOSITORY": "repository", "GITHUB_REPOSITORY_ID": "repository_id",
+                          "GITHUB_REF": "ref", "GITHUB_SHA": "source_sha", "GITHUB_WORKFLOW_REF": "workflow_ref",
+                          "GITHUB_WORKFLOW_SHA": "workflow_sha", "GITHUB_RUN_ID": "run_id", "GITHUB_RUN_ATTEMPT": "run_attempt"}
+        publications = publisher.remote.cohort(self.metadata["inventory.tsv"], fixtures.RELEASE)
+        self.synthetic_indexes = {identity: {"versions": ["0.1.0"], "latest": "0.1.0", "release": "0.1.0",
+                                            "last_updated": "20260913000000", "size": 500, "sha256": "0" * 64}
+                                  for identity in publications}
+        return {"phase": "writer", "root": str(self.checkout), "archive": str(self.archive_path),
+                "record": {"selection": self.selection, "preflight": before,
+                           "window": {"control": {"fixture": "synthetic"}, "registry": {"fixture": "synthetic"}}},
+                "context": {**{key: str(invocation[field]) for key, field in context_fields.items()},
+                            "GITHUB_EVENT_NAME": "workflow_dispatch"},
+                "seal_sha256": self.selection["producer"]["seal_sha256"],
+                "inventory_sha256": self.selection["producer"]["inventory_sha256"],
+                "completed": [], "active": sorted(publications)[0], "indexes_before": None, "progress": None, "window_progress": None,
+                "credentials": {"api_token": "synthetic_api_read", "username": "reader", "token": "synthetic_package_read"}}
+
+    def test_bridge_binds_separate_invocation_and_restored_seal_before_network_and_never_invents_readback(self):
+        before = self.admitted()
+        request = self.request(before)
+        indexes = self.patch(publisher.remote, "prewrite_indexes", return_value=self.synthetic_indexes)
+        absent = self.patch(publisher.remote, "refuse_existing_paths")
+        window = self.patch(publisher, "observe_release_window", return_value=request["record"]["window"])
+        result = publisher.native_boundary(request)
+        self.assertEqual(result["indexes_before"], self.synthetic_indexes)
+        self.assertIsNone(result["readback"])
+        self.assertEqual(result["completed"], [])
+        self.assertEqual(result["scope"], "native-release-boundary-admitted")
+        self.assertEqual(result["expires_at"], self.selection["release_window"]["expires_at"])
+        absent.assert_called_once_with(self.metadata["inventory.tsv"], fixtures.RELEASE,
+                                       username="reader", token="synthetic_package_read")
+        window.assert_called_once_with(self.selection, api_token="synthetic_api_read", package_token="synthetic_package_read",
+                                       deleted_observer=mock.ANY, before=request["record"]["window"], completed=[], progress=None)
+        with mock.patch.object(publisher, "controller_deleted_versions", return_value={"synthetic": "not-authority"}) as audit:
+            self.assertEqual(window.call_args.kwargs["deleted_observer"](), {"synthetic": "not-authority"})
+            audit.assert_called_once_with(self.archive_path, self.selection)
+        self.assertNotIn("synthetic_package_read", json.dumps(result))
+        self.assertNotIn("synthetic_api_read", repr(self.lineage.call_args))
+        self.assertEqual(len(self.requests), 14)
+        self.native.assert_not_called()
+        self.assert_cleaned()
+        for changed in (request | {"seal_sha256": "1" * 64}, request | {"approved": True},
+                        request | {"context": request["context"] | {"GITHUB_RUN_ID": "31"}},
+                        request | {"context": request["context"] | {"GITHUB_RUN_ATTEMPT": "2"}},
+                        request | {"completed": [request["active"], request["active"]]}):
+            with self.subTest(keys=sorted(changed)):
+                indexes.reset_mock()
+                self.reset_responses()
+                with self.assertRaisesRegex(policy.Refusal, "^Native publisher boundary refused$"):
+                    publisher.native_boundary(changed)
+                indexes.assert_not_called()
+                self.assertEqual(self.requests, [])
+
+    def test_bridge_keeps_actual_progress_separate_from_prior_index_state_and_reobserves_policy_last(self):
+        before = self.admitted()
+        request = self.request(before)
+        identity = request["active"]
+        request.update(phase="readback", active=None, completed=[identity], indexes_before=self.synthetic_indexes,
+                       window_progress=request["record"]["window"])
+        self.patch(publisher, "observe_release_window", return_value=request["record"]["window"])
+
+        def readback(inventory, version, previous, completed, **credentials):
+            self.events.append("remote-readback")
+            self.assertEqual(completed, [identity])
+            self.assertEqual(previous, self.synthetic_indexes)
+            return {"completed": completed, "inventory_sha256": policy.digest(inventory), "indexes": {"synthetic": "observed"}}
+
+        verify = self.patch(publisher.remote, "verify_remote", side_effect=readback)
+        result = publisher.native_boundary(request)
+        self.assertEqual(result["readback"]["completed"], [identity])
+        self.assertEqual(result["indexes_before"], self.synthetic_indexes)
+        self.assertLess(self.events.index("remote-readback"), next(i for i, event in enumerate(self.events) if event.startswith("http:")))
+        self.assertEqual(self.events[-3:], ["source", "archive", "lineage"])
+        verify.assert_called_once()
+        self.native.assert_not_called()
+        self.assert_cleaned()
+        self.reset_responses()
+        verify.reset_mock()
+        request["progress"] = result["readback"]
+        with self.assertRaisesRegex(policy.Refusal, "^Native publisher boundary refused$"):
+            publisher.native_boundary(request)
+        verify.assert_not_called()
+        self.assertEqual(self.requests, [])
+
+
+class NativeBoundaryCliTests(unittest.TestCase):
+    BASE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/synthetic-owned",
+                "TMPDIR": "/synthetic-owned", "LANG": "C", "LC_ALL": "C"}
+    LAUNCHER_ENV = {name: "synthetic_DISCARDED_value" for name in (
+        "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING")}
+
+    def test_darwin_discards_only_launcher_values_before_reading_or_handling_input(self):
+        error = io.StringIO()
+        environments = []
+
+        def read(size):
+            environments.append(("read", dict(os.environ)))
+            return b"{}"
+
+        def handle(request):
+            environments.append(("boundary", dict(os.environ)))
+            raise policy.Refusal("Synthetic malformed request")
+
+        with mock.patch.object(publisher.sys, "platform", "darwin"), \
+                mock.patch.dict(os.environ, self.BASE_ENV | self.LAUNCHER_ENV, clear=True), \
+                mock.patch.object(publisher.sys, "stdin") as stdin, \
+                mock.patch.object(publisher, "native_boundary", side_effect=handle) as boundary, redirect_stderr(error):
+            stdin.buffer.read.side_effect = read
+            self.assertEqual(publisher.main([]), 1)
+            stdin.buffer.read.assert_called_once_with(policy.MAX_META + 1)
+            boundary.assert_called_once_with({})
+        self.assertEqual(environments, [("read", self.BASE_ENV), ("boundary", self.BASE_ENV)])
+        self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_darwin_still_refuses_arguments_and_every_other_ambient_custody_name_before_input(self):
+        names = ("GITHUB_TOKEN", "KIRA_MAVEN_WRITE_TOKEN", "KIRA_PACKAGES_METADATA_AUDIT_TOKEN",
+                 "KIRA_PUBLICATION_API_READ_TOKEN", "KIRA_MAVEN_READ_TOKEN", "KIRA_PACKAGES_READ_TOKEN",
+                 "PYTHONPATH", "DYLD_LIBRARY_PATH", "GIT_CONFIG_GLOBAL", "SDKROOT_EXTRA")
+        cases = [([], {name: "synthetic_SECRET_value"}) for name in names] + [(["synthetic_SECRET_argument"], {})]
+        for arguments, extra in cases:
+            with self.subTest(arguments=bool(arguments), names=list(extra)):
+                error = io.StringIO()
+                with mock.patch.object(publisher.sys, "platform", "darwin"), \
+                        mock.patch.dict(os.environ, self.BASE_ENV | self.LAUNCHER_ENV | extra, clear=True), \
+                        mock.patch.object(publisher.sys, "stdin") as stdin, \
+                        mock.patch.object(publisher, "native_boundary") as boundary, redirect_stderr(error):
+                    self.assertEqual(publisher.main(arguments), 1)
+                    boundary.assert_not_called()
+                    stdin.buffer.read.assert_not_called()
+                    if arguments:
+                        self.assertTrue(set(self.LAUNCHER_ENV) <= set(os.environ))
+                self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_non_darwin_never_discards_or_admits_the_launcher_names(self):
+        for platform in ("linux", "win32"):
+            for name, value in self.LAUNCHER_ENV.items():
+                with self.subTest(platform=platform, name=name):
+                    error = io.StringIO()
+                    environment = self.BASE_ENV | {name: value}
+                    with mock.patch.object(publisher.sys, "platform", platform), \
+                            mock.patch.dict(os.environ, environment, clear=True), \
+                            mock.patch.object(publisher.sys, "stdin") as stdin, \
+                            mock.patch.object(publisher, "native_boundary") as boundary, redirect_stderr(error):
+                        self.assertEqual(publisher.main([]), 1)
+                        self.assertEqual(dict(os.environ), environment)
+                        boundary.assert_not_called()
+                        stdin.buffer.read.assert_not_called()
+                    self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_real_system_python_clean_cli_reaches_malformed_request_without_network(self):
+        source = Path(__file__).resolve().parent
+        names = ("publisher_publication_intake.py", "remote_maven_readback.py", "publication_policy.py",
+                 "github_publication_receipts.py", "connected_publication_intake.py")
+        with tempfile.TemporaryDirectory(prefix="kira-native-cli-") as temporary:
+            root = Path(temporary).resolve(strict=True)
+            scripts = root / "scripts"
+            scripts.mkdir(mode=0o700)
+            for name in names:
+                target = scripts / name
+                target.write_bytes((source / name).read_bytes())
+                target.chmod(0o600)
+            driver = root / "probe.py"
+            driver.write_text(self.CLI_PROBE, encoding="utf-8")
+            driver.chmod(0o600)
+            environment = self.BASE_ENV | {"HOME": str(root), "TMPDIR": str(root)}
+            result = subprocess.run(["/usr/bin/python3", "-B", "-E", "-s", str(driver)], input=b"{}",
+                                    env=environment, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(result.returncode, 0)
+            self.assertLessEqual(len(result.stdout), 4096)
+            self.assertEqual(result.stderr, b"Native publisher boundary refused. No release authority.\n")
+            self.assertEqual(json.loads(result.stdout), {"main": True, "boundary": True, "clean": True,
+                                                       "removed": True, "schema_refused": True, "exit": 1,
+                                                       "network": 0, "subprocess": 0})
+        self.assertFalse(root.exists())
+
+    CLI_PROBE = r'''import json, os, pathlib, runpy, sys
+scripts = pathlib.Path(__file__).parent / 'scripts'
+target = str(scripts / 'publisher_publication_intake.py')
+allowed = {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'}
+discarded = {'CPATH', 'LIBRARY_PATH', 'MANPATH', 'SDKROOT', '__CF_USER_TEXT_ENCODING'}
+report = dict(main=False, boundary=False, clean=False, removed=False, schema_refused=False,
+              exit=None, network=0, subprocess=0)
+
+def audit(event, args):
+    if event.startswith('socket.'):
+        report['network'] += 1
+        raise RuntimeError('Test network forbidden')
+    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'):
+        report['subprocess'] += 1
+        raise RuntimeError('Test subprocess forbidden')
+
+def trace(frame, event, arg):
+    if frame.f_code.co_filename != target:
+        return None
+    function = frame.f_code.co_name
+    if event == 'call' and function == 'main':
+        report['main'] = True
+    if event == 'call' and function == 'native_boundary':
+        report['boundary'] = True
+        report['clean'] = set(os.environ) <= allowed
+        report['removed'] = not (set(os.environ) & discarded)
+    if event == 'exception' and function == 'native_boundary' and arg[0].__name__ == 'Refusal':
+        report['schema_refused'] = True
+    return trace
+
+sys.addaudithook(audit)
+sys.path.insert(0, str(scripts))
+sys.settrace(trace)
+try:
+    runpy.run_path(target, run_name='__main__')
+except SystemExit as error:
+    report['exit'] = error.code if type(error.code) is int else None
+except BaseException:
+    pass
+finally:
+    sys.settrace(None)
+sys.stdout.write(json.dumps(report))
+'''
+
+
+class NativeAttachmentSourceTests(unittest.TestCase):
+    def test_cli_refuses_ambient_write_custody_and_secret_arguments_without_echo_or_work(self):
+        for arguments, environment in [(["synthetic_SECRET_argument"], {}),
+                                       ([], {"KIRA_MAVEN_WRITE_TOKEN": "synthetic_SECRET_write"}),
+                                       ([], {"KIRA_PACKAGES_METADATA_AUDIT_TOKEN": "synthetic_SECRET_audit"}),
+                                       ([], {"GITHUB_TOKEN": "synthetic_SECRET_ambient"})]:
+            with self.subTest(environment=list(environment)):
+                error = io.StringIO()
+                with mock.patch.dict(os.environ, environment, clear=True), redirect_stderr(error), \
+                        mock.patch.object(publisher, "native_boundary") as boundary, \
+                        mock.patch.object(publisher.sys, "stdin") as stdin:
+                    self.assertEqual(publisher.main(arguments), 1)
+                    boundary.assert_not_called()
+                    stdin.buffer.read.assert_not_called()
+                self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_actual_native_attachment_retains_original_action_and_fresh_window_before_guard_completion(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "gradle/publication-gates.gradle.kts").read_text()
+        guard = source.split('writer.doFirst("whole-cohort sealed byte guard") {', 1)[1].split("val recipe = writer.actions.toList()", 1)[0]
+        remote_guard = guard.split("if (remoteMode) {", 1)[1]
+        self.assertLess(remote_guard.index("remoteObservation(bundle, writer)"), remote_guard.index("auditPromotionGraph()"))
+        self.assertLess(guard.index("compareRestored(readBundle())"), guard.index("requireOpenWindow(observation)"))
+        self.assertLess(guard.index("requireOpenWindow(observation)"), guard.index("guardedWriters.add(writer.path)"))
+        self.assertNotIn('requireBytes(false, "REMOTE_HELD"', guard)
+        self.assertIn("recipe[1] === nativeActions.single()", source)
+        self.assertIn("selected.toSet() == writers.toSet()", source)
+        self.assertIn("builder.environment().clear()", source)
+        command = source.split('val builder = ProcessBuilder(', 1)[1].split("val child = builder.start()", 1)[0]
+        self.assertNotIn("writeToken", command)
+        self.assertNotIn("readToken", command)
+        self.assertNotIn("apiToken", command)
+        self.assertIn('"/usr/bin/python3", "-B", "-E", "-s", helper.toString()', command)
+        self.assertIn("readToken != writeToken && apiToken != writeToken", source)
+        progress = source.split("val prior = guarded.filter { writer ->", 1)[1].split("val completedIds", 1)[0]
+        self.assertIn("val status = (writer as Task).state", progress)
+        self.assertIn("status.failure == null", progress)
+        snapshot = source.split('val sourceSha = jsonMap(jsonMap(record["selection"])["producer"])', 1)[1].split("val builder = ProcessBuilder(", 1)[0]
+        self.assertIn('"/usr/bin/git", "--no-optional-locks"', snapshot)
+        self.assertIn('"ls-tree", "-z", "--full-tree"', snapshot)
+        self.assertIn("gitBuilder.environment().clear()", snapshot)
+        self.assertIn('"GIT_NO_LAZY_FETCH" to "1"', snapshot)
+        self.assertIn("it.readNBytes(4097)", snapshot)
+        self.assertIn('digest.update("blob ${bytes.size}\\u0000".toByteArray(UTF_8))', snapshot)
+        self.assertIn("HexFormat.of().formatHex(digest.digest(bytes)) == blobs.getValue(path)", snapshot)
+        self.assertLess(snapshot.index("digest.digest(bytes)"), snapshot.index("Files.write(target, bytes)"))
+        self.assertIn('val helper = scripts.resolve("publisher_publication_intake.py")', snapshot)
+        self.assertNotIn("writeToken", snapshot)
+        self.assertNotIn("readToken", snapshot)
+        self.assertNotIn("apiToken", snapshot)
+        model = source.split("fun modelText(", 1)[1].split("fun linkedPath(", 1)[0]
+        self.assertNotIn("remoteDestination", model)
+        self.assertNotIn("nativeCredentials", model)
+        self.assertIn('"gradle/publication-gates.gradle.kts"', model)
+        normal = source.split("if (byteMode == null) {", 1)[1].split("} else {", 1)[0]
+        self.assertIn("allTasks.none { it is PublishToMavenRepository }", normal)
+        evidence = source.split('val observation = remoteObservation(bundle, null)', 1)[1].split("return@doLast", 1)[0]
+        self.assertLess(evidence.index("selected.forEach(::completed)"), evidence.index("Files.write(path, data, CREATE_NEW, WRITE)"))
+        self.assertLess(evidence.index("requireOpenWindow(observation)"), evidence.index("Files.write(path, data, CREATE_NEW, WRITE)"))
+        self.assertIn('"remote-readback.json"', evidence)
+
+
+class ReleaseWindowTests(unittest.TestCase):
+    connect = http_fixtures.ReceiptAcquisitionTests.connect
+    assertClosed = http_fixtures.ReceiptAcquisitionTests.assertClosed
+
+    def setUp(self):
+        http_fixtures.ReceiptAcquisitionTests.setUp(self)
+        invocation, protection = http_fixtures.publisher_selection()
+        producer = fixtures.expected()
+        self.selection = {"producer": producer, "publisher": invocation, "protection": protection,
+                          "app_parity_ref": "synthetic-app", "backend_parity_ref": "synthetic-backend",
+                          "release_window": selected_window(producer, invocation, protection)}
+        self.reset()
+        self.addCleanup(self.assertClosed)
+
+    def reset(self, values=None):
+        self.assertClosed()
+        values = window_values(self.selection) if values is None else values
+        self.responses = [http_fixtures.Response(value) for value in values[:9]] + registry_fixtures.registry_responses(values[9:])
+        self.connections.clear()
+        self.requests.clear()
+
+    def observe(self, **kwargs):
+        observer = lambda: publisher.remote.observe_deleted_versions(self.selection["release_window"]["packages"],
+                            self.selection["publisher"]["repository_id"], token="synthetic_METADATA_AUDIT")
+        return publisher.observe_release_window(self.selection, api_token="synthetic_API_READ",
+                                                 package_token="synthetic_PACKAGE_READ", deleted_observer=observer, **kwargs)
+
+    def test_live_repo_and_complete_registry_recheck_uses_distinct_read_channels(self):
+        before = self.observe()
+        self.assertEqual(len(self.requests), 40)
+        self.assertEqual(before["control"]["active_run_id"], self.selection["publisher"]["run_id"])
+        for number, (_, request) in enumerate(self.requests):
+            token = "synthetic_API_READ" if number < 9 else ("synthetic_PACKAGE_READ" if number < 25 else "synthetic_METADATA_AUDIT")
+            self.assertEqual(request["headers"]["Authorization"], "Bearer " + token)
+        self.assertNotIn("synthetic_API_READ", json.dumps(before))
+        self.assertNotIn("synthetic_PACKAGE_READ", json.dumps(before))
+        self.reset()
+        self.assertEqual(self.observe(before=before), before)
+        self.assertEqual(len(self.requests), 40)
+
+    def test_bad_window_or_extra_grant_refuses_before_http(self):
+        original = copy.deepcopy(self.selection["release_window"])
+        cases = [None, original | {"approved": True}, original | {"expires_at": original["not_before"]},
+                 original | {"expires_at": original["not_before"] + 14401},
+                 original | {"expires_at": int(time.time()) - 1},
+                 original | {"owner": original["owner"] | {"id": 999}},
+                 original | {"disabled_workflow_ids": [18]}, original | {"disabled_workflow_ids": [17, 17]},
+                 original | {"packages": {}}]
+        for value in cases:
+            with self.subTest(value=value):
+                self.selection["release_window"] = value
+                with self.assertRaisesRegex(policy.Refusal, "^Release window observation refused$"):
+                    self.observe()
+                self.assertEqual(self.requests, [])
+        self.selection["release_window"] = original
+
+    def test_other_writers_enabled_workflows_runs_or_default_permission_changes_refuse(self):
+        original = window_values(self.selection)
+        changes = [lambda value: value[0].append({"id": 999}), lambda value: value[0][0]["permissions"].update(admin=False),
+                   lambda value: value[1].append({"id": 999}),
+                   lambda value: value[2].update(default_workflow_permissions="write"),
+                   lambda value: value[3]["workflows"][0].update(state="active"),
+                   lambda value: value[3]["workflows"][1].update(path=".github/workflows/other.yml"),
+                   lambda value: value[3].update(total_count=3),
+                   lambda value: value[4].update(total_count=1, workflow_runs=[{}]),
+                   lambda value: value[8]["workflow_runs"][0].update(run_attempt=2)]
+        for number, change in enumerate(changes):
+            values = copy.deepcopy(original)
+            change(values)
+            self.reset(values)
+            with self.subTest(change=number), self.assertRaisesRegex(policy.Refusal, "^Release window observation refused$"):
+                self.observe()
+            self.assertTrue(all("/orgs/" not in args[1] for args, _ in self.requests))
+
+    def test_control_snapshot_change_and_expiry_during_network_are_not_cached_passes(self):
+        before = self.observe()
+        values = window_values(self.selection)
+        values[3]["workflows"][0]["path"] = ".github/workflows/replaced.yml"
+        self.reset(values)
+        with self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.reset()
+        clock = [self.selection["release_window"]["not_before"] + 1]
+        connect = self.connect
+
+        def advance(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            if len(self.connections) == 40:
+                clock[0] = self.selection["release_window"]["expires_at"]
+            return connection
+
+        self.factory.side_effect = advance
+        with mock.patch.object(publisher.time, "time", side_effect=lambda: clock[0]), self.assertRaises(policy.Refusal):
+            self.observe(before=before)
+        self.assertEqual(len(self.requests), 40)
+
+
+if __name__ == "__main__":
+    unittest.main()

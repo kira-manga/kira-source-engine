@@ -1,5 +1,6 @@
 """Actual adapter with synthetic HTTP responses; not live GitHub/provenance evidence."""
 
+import copy
 import io
 import json
 import ssl
@@ -9,6 +10,62 @@ from unittest import mock
 import github_publication_receipts as r
 import publication_policy as p
 from test_publication_policy import expected, receipts
+
+
+def publisher_selection():
+    """All IDs/refs are synthetic fixture choices, not operational release selections."""
+    ref, sha = "refs/heads/remediation/publisher", "6" * 40
+    publisher = {"repository": p.REPOSITORY, "repository_id": 73, "ref": ref,
+                 "workflow_ref": p.REPOSITORY + "/" + r.PUBLISHER_WORKFLOW + "@" + ref,
+                 "source_sha": sha, "workflow_sha": sha, "run_id": 61, "run_attempt": 1, "workflow_id": 18}
+    protection = {"environment": {"id": 71, "name": "publisher/release gate", "branch_policy_id": 501,
+                                   "reviewer_ids": [81]},
+                  "branches": [{"name": p.BRANCH, "tip": "e" * 40, "approvals": 0,
+                                "checks": [{"context": "verify", "app_id": 121}]},
+                               {"name": ref[len("refs/heads/"):], "tip": sha, "approvals": 0,
+                                "checks": [{"context": "verify", "app_id": 121}]}],
+                  "tag": {"name": "v1.2.3", "object": "9" * 40}}
+    return publisher, protection
+
+
+def publisher_context():
+    publisher, _ = publisher_selection()
+    fields = {"GITHUB_REPOSITORY": "repository", "GITHUB_REPOSITORY_ID": "repository_id",
+              "GITHUB_REF": "ref", "GITHUB_WORKFLOW_REF": "workflow_ref", "GITHUB_WORKFLOW_SHA": "workflow_sha",
+              "GITHUB_SHA": "source_sha", "GITHUB_RUN_ID": "run_id", "GITHUB_RUN_ATTEMPT": "run_attempt"}
+    return {key: str(publisher[field]) for key, field in fields.items()} | {"GITHUB_EVENT_NAME": "workflow_dispatch"}
+
+
+def publisher_policy_values(publisher=None, protection=None):
+    publisher, protection = (publisher, protection) if publisher is not None else publisher_selection()
+    branch = publisher["ref"][len("refs/heads/"):]
+    run = {"id": publisher["run_id"], "run_attempt": 1, "workflow_id": publisher["workflow_id"],
+           "head_sha": publisher["source_sha"], "head_branch": branch, "path": r.PUBLISHER_WORKFLOW,
+           "event": "workflow_dispatch", "status": "in_progress", "conclusion": None,
+           "repository": {"id": publisher["repository_id"], "full_name": p.REPOSITORY},
+           "head_repository": {"id": publisher["repository_id"], "full_name": p.REPOSITORY}}
+    selected = protection["environment"]
+    env = {"id": selected["id"], "name": selected["name"], "can_admins_bypass": False,
+           "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
+           "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
+                                 "reviewers": [{"type": "User", "reviewer": {"type": "User", "id": identity}}
+                                               for identity in selected["reviewer_ids"]]}, {"type": "branch_policy"}],
+           "url": "https://untrusted.invalid/ignored", "note": "synthetic_PRIVATE_response"}
+    inventory = {"total_count": 1,
+                 "branch_policies": [{"id": selected["branch_policy_id"], "name": branch, "type": "branch"}]}
+    tag = {"ref": "refs/tags/" + protection["tag"]["name"],
+           "object": {"sha": protection["tag"]["object"], "type": "tag"}}
+    values = [run, env, inventory, copy.deepcopy(env), tag]
+    for item in sorted(protection["branches"], key=lambda value: value["name"]):
+        values.append({"name": item["name"], "protected": True, "commit": {"sha": item["tip"]}})
+        values.append({"enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False},
+                       "allow_deletions": {"enabled": False},
+                       "required_pull_request_reviews": {"required_approving_review_count": item["approvals"],
+                                                         "dismiss_stale_reviews": True, "require_last_push_approval": False,
+                                                         "bypass_pull_request_allowances": {"users": [], "teams": [], "apps": []}},
+                       "required_status_checks": {"strict": True, "checks": copy.deepcopy(item["checks"]),
+                                                  "contexts": [check["context"] for check in item["checks"]]}})
+    return values + [copy.deepcopy(run)]
 
 
 class Response:
@@ -80,6 +137,18 @@ class ReceiptAcquisitionTests(unittest.TestCase):
                 r.acquire_official_receipts(expected(), token)
         self.factory.assert_not_called()
 
+    def test_fixed_deprecation_metadata_is_not_pagination(self):
+        self.responses = [Response(receipts()[k], headers={"Link": r.DEPRECATION_LINK})
+                          for k in ("attempt", "jobs", "artifact", "current")]
+        self.assertEqual(r.acquire_official_receipts(expected()), receipts())
+        prefix = "/repos/kira-manga/kira-source-engine/actions/"
+        self.assertEqual([a for a, _ in self.requests], [
+            ("GET", prefix + "runs/31/attempts/2"),
+            ("GET", prefix + "runs/31/attempts/2/jobs?per_page=100&page=1"),
+            ("GET", prefix + "artifacts/42"), ("GET", prefix + "runs/31")])
+        self.assertEqual(len(self.connections), 4)
+        self.assertClosed()
+
     def test_anonymous_is_explicit_and_proxy_environment_not_used(self):
         with mock.patch.dict("os.environ", {"HTTPS_PROXY": "https://untrusted.invalid", "GH_TOKEN": "ignored"}):
             r.acquire_official_receipts(expected())
@@ -90,6 +159,13 @@ class ReceiptAcquisitionTests(unittest.TestCase):
         cases = [(302, {"Location": "https://other.invalid/token"}), (403, {}), (429, {}),
                  (200, {"Content-Encoding": "gzip"}), (200, {"Link": '<https://other.invalid>; rel="next"'}),
                  (200, {"Content-Type": "text/html"}), (200, {"Content-Length": str(p.MAX_META + 1)})]
+        next_link = '<https://other.invalid>; rel="next"'
+        cases += [(200, {"Link": link}) for link in (
+            r.DEPRECATION_LINK + ", " + next_link,
+            next_link + ", " + r.DEPRECATION_LINK,
+            r.DEPRECATION_LINK + ", " + r.DEPRECATION_LINK,
+            r.DEPRECATION_LINK.replace("api-versions>", "api-versions/other>"),
+            r.DEPRECATION_LINK.replace('rel="deprecation"', 'rel="next"'))]
         for status, headers in cases:
             with self.subTest(status=status, headers=headers):
                 self.responses = [Response({}, headers=headers, status=status)]
@@ -330,6 +406,391 @@ class EnvironmentConfigurationAcquisitionTests(unittest.TestCase):
         self.assertTrue(all("Authorization" not in kwargs["headers"] for _, kwargs in self.requests))
         self.assertEqual(len(self.requests), 3)
         self.assertClosed()
+
+
+class PublisherPolicyAcquisitionTests(unittest.TestCase):
+    connect = ReceiptAcquisitionTests.connect
+    assertClosed = ReceiptAcquisitionTests.assertClosed
+    closeResponses = EnvironmentConfigurationAcquisitionTests.closeResponses
+
+    def setUp(self):
+        ReceiptAcquisitionTests.setUp(self)
+        self.publisher, self.protection = publisher_selection()
+        self.resetResponses()
+        self.addCleanup(self.closeResponses)
+
+    def resetResponses(self, values=None):
+        self.closeResponses()
+        values = publisher_policy_values(self.publisher, self.protection) if values is None else values
+        self.responses = [Response(value) for value in values]
+        self.connections.clear()
+        self.requests.clear()
+
+    def acquire(self, token=None):
+        return r.acquire_publisher_policy(self.publisher, self.protection, token=token)
+
+    def assertRefused(self, token=None):
+        with self.assertRaises(p.Refusal) as caught:
+            self.acquire(token)
+        self.assertEqual(str(caught.exception), "Publisher policy observation refused")
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertClosed()
+
+    def test_exact_current_last_gets_copied_selections_and_token_only_in_transport(self):
+        selected_publisher, selected_protection = copy.deepcopy((self.publisher, self.protection))
+
+        def mutate(host, **kwargs):
+            connection = self.connect(host, **kwargs)
+            self.publisher["run_id"] = 999
+            self.protection["environment"]["reviewer_ids"].append(999)
+            self.protection["branches"][0]["checks"][0]["app_id"] = 999
+            return connection
+
+        self.factory.side_effect = mutate
+        result = self.acquire("synthetic_READ_TOKEN")
+        prefix = "/repos/" + p.REPOSITORY
+        env = prefix + "/environments/publisher%2Frelease%20gate"
+        branch = prefix + "/branches/remediation%2Fproduction-readiness-2026-09-04"
+        publisher_branch = prefix + "/branches/remediation%2Fpublisher"
+        self.assertEqual([args for args, _ in self.requests], [("GET", path) for path in (
+            prefix + "/actions/runs/61/attempts/1", env, env + "/deployment-branch-policies?per_page=100&page=1",
+            env, prefix + "/git/ref/tags/v1.2.3", branch, branch + "/protection", publisher_branch,
+            publisher_branch + "/protection", prefix + "/actions/runs/61")])
+        self.assertEqual(result["publisher"], selected_publisher)
+        self.assertEqual(result["branches"], selected_protection["branches"])
+        self.assertEqual([branch["approvals"] for branch in result["branches"]], [0, 0])
+        self.assertEqual(result["environment"]["reviewer_ids"], [81])
+        self.assertIs(result["environment"]["prevent_self_review"], False)
+        self.assertNotIn("approved", json.dumps(result))
+        self.assertNotIn("synthetic_", json.dumps(result))
+        self.assertTrue(all(kwargs["headers"]["Authorization"] == "Bearer synthetic_READ_TOKEN"
+                            for _, kwargs in self.requests))
+        self.assertClosed()
+
+    def test_invalid_independent_selection_refuses_before_any_get(self):
+        original = copy.deepcopy((self.publisher, self.protection))
+        edits = [("publisher", "run_attempt", 2), ("publisher", "run_id", True),
+                 ("publisher", "repository_id", 2**63), ("publisher", "workflow_sha", "0" * 40),
+                 ("publisher", "ref", "refs/tags/v1.2.3"), ("publisher", "extra", "untrusted"),
+                 ("environment", "reviewer_ids", []), ("environment", "reviewer_ids", [81, 81]),
+                 ("environment", "reviewer_ids", [True]), ("environment", "name", "bad%2Fname"),
+                 ("environment", "branch_policy_id", 0), ("branch", "name", "other"),
+                 ("branch", "approvals", 1), ("branch", "approvals", False), ("branch", "approvals", 0.0),
+                 ("branch", "checks", []), ("branch", "checks", [{"context": "verify", "app_id": None}]),
+                 ("tag", "name", "../v1.2.3"), ("tag", "object", "short")]
+        for group, key, value in edits:
+            with self.subTest(group=group, key=key, value=value):
+                self.publisher, self.protection = copy.deepcopy(original)
+                target = {"publisher": self.publisher, "environment": self.protection["environment"],
+                          "branch": self.protection["branches"][0], "tag": self.protection["tag"]}[group]
+                target[key] = value
+                self.assertRefused()
+        self.publisher, self.protection = original
+        self.assertRefused("synthetic\r\nSECRET")
+        self.factory.assert_not_called()
+
+    def test_both_publisher_reads_require_this_in_progress_dispatch_attempt_one(self):
+        for index in (0, 9):
+            for patch in ({"status": "completed", "conclusion": "success"}, {"status": "queued"},
+                          {"run_attempt": 2}, {"run_attempt": True}, {"event": "push"},
+                          {"head_sha": "0" * 40}, {"head_branch": p.BRANCH}, {"workflow_id": 17},
+                          {"path": p.WORKFLOW}, {"repository": {"id": 74, "full_name": p.REPOSITORY}},
+                          {"head_repository": {"id": 73, "full_name": "other/repo"}}):
+                with self.subTest(index=index, patch=patch):
+                    values = publisher_policy_values()
+                    values[index].update(patch)
+                    self.resetResponses(values)
+                    self.assertRefused()
+                    self.assertEqual(len(self.requests), index + 1)
+
+    def test_both_environment_reads_require_explicit_named_nonbypass_self_approval_policy(self):
+        for index in (1, 3):
+            for kind in ("missing-bypass", "bypass", "self-review", "missing-self-review", "null-self-review",
+                         "numeric-self-review", "text-self-review", "reviewer", "team", "missing-rules", "unknown-rule"):
+                with self.subTest(index=index, kind=kind):
+                    values = publisher_policy_values()
+                    env = values[index]
+                    if kind == "missing-bypass":
+                        del env["can_admins_bypass"]
+                    elif kind == "bypass":
+                        env["can_admins_bypass"] = True
+                    elif kind == "self-review":
+                        env["protection_rules"][0]["prevent_self_review"] = True
+                    elif kind == "missing-self-review":
+                        del env["protection_rules"][0]["prevent_self_review"]
+                    elif kind in ("null-self-review", "numeric-self-review", "text-self-review"):
+                        env["protection_rules"][0]["prevent_self_review"] = {
+                            "null-self-review": None, "numeric-self-review": 0, "text-self-review": "false"}[kind]
+                    elif kind == "reviewer":
+                        env["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 83
+                    elif kind == "team":
+                        env["protection_rules"][0]["reviewers"][0]["type"] = "Team"
+                    elif kind == "missing-rules":
+                        del env["protection_rules"]
+                    else:
+                        env["protection_rules"][1]["type"] = "custom"
+                    self.resetResponses(values)
+                    self.assertRefused()
+                    self.assertEqual(len(self.requests), 4)
+
+    def test_protected_lineage_checks_refuse_missing_bypass_or_ambiguous_check_authority(self):
+        for index in (6, 8):
+            for kind in ("admins", "force", "delete", "count", "count-bool", "stale", "last-push", "missing-bypass",
+                         "bypass", "strict", "check-app", "contexts"):
+                with self.subTest(index=index, kind=kind):
+                    values = publisher_policy_values()
+                    branch = values[index]
+                    reviews = branch["required_pull_request_reviews"]
+                    if kind in ("admins", "force", "delete"):
+                        key = {"admins": "enforce_admins", "force": "allow_force_pushes", "delete": "allow_deletions"}[kind]
+                        branch[key]["enabled"] = kind != "admins"
+                    elif kind in ("count", "count-bool", "stale", "last-push"):
+                        key = {"count": "required_approving_review_count", "count-bool": "required_approving_review_count",
+                               "stale": "dismiss_stale_reviews", "last-push": "require_last_push_approval"}[kind]
+                        reviews[key] = {"count": 1, "count-bool": False, "stale": False, "last-push": True}[kind]
+                    elif kind == "missing-bypass":
+                        del reviews["bypass_pull_request_allowances"]
+                    elif kind == "bypass":
+                        reviews["bypass_pull_request_allowances"]["apps"] = [{"id": 121}]
+                    elif kind == "strict":
+                        branch["required_status_checks"]["strict"] = False
+                    elif kind == "check-app":
+                        branch["required_status_checks"]["checks"][0]["app_id"] = None
+                    else:
+                        branch["required_status_checks"]["contexts"] = ["extra"]
+                    self.resetResponses(values)
+                    self.assertRefused()
+                    self.assertEqual(len(self.requests), index + 1)
+
+    def test_remote_tag_branch_and_policy_inventory_must_remain_exact(self):
+        for index, patch in ((2, {"total_count": 2}), (4, {"object": {"sha": "0" * 40, "type": "tag"}}),
+                             (5, {"protected": False}), (5, {"commit": {"sha": "0" * 40}}),
+                             (7, {"name": "other"})):
+            with self.subTest(index=index, patch=patch):
+                values = publisher_policy_values()
+                values[index].update(patch)
+                self.resetResponses(values)
+                self.assertRefused()
+                self.assertEqual(len(self.requests), index + 1)
+
+    def test_unknown_policy_http_and_provider_errors_never_fall_back_or_echo(self):
+        for status, headers in ((403, {}), (404, {}), (302, {"Location": "https://untrusted.invalid"}),
+                                (200, {"Link": '<https://untrusted.invalid>; rel="next"'})):
+            with self.subTest(status=status, headers=headers):
+                self.resetResponses()
+                self.responses[6].close()
+                self.responses[6] = Response({}, status=status, headers=headers)
+                self.assertRefused()
+                self.assertEqual(len(self.requests), 7)
+        self.resetResponses()
+        with mock.patch.object(Response, "read1", side_effect=OSError("synthetic_SECRET_response")):
+            self.assertRefused("synthetic_SECRET_token")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_one_selected_branch_can_bind_both_sources_without_conflating_invocations(self):
+        self.publisher["ref"] = p.REF
+        self.publisher["workflow_ref"] = p.REPOSITORY + "/" + r.PUBLISHER_WORKFLOW + "@" + p.REF
+        self.publisher["source_sha"] = self.publisher["workflow_sha"] = self.protection["branches"][0]["tip"]
+        self.protection["branches"] = self.protection["branches"][:1]
+        self.resetResponses()
+        with mock.patch.dict("os.environ", {"GH_TOKEN": "ignored", "HTTPS_PROXY": "https://untrusted.invalid"}):
+            result = self.acquire()
+        self.assertEqual(len(result["branches"]), 1)
+        self.assertEqual(len(self.requests), 8)
+        self.assertTrue(all("Authorization" not in kwargs["headers"] for _, kwargs in self.requests))
+        self.assertClosed()
+
+
+class WorkflowAcquisitionTests(unittest.TestCase):
+    setUp = ReceiptAcquisitionTests.setUp
+    connect = ReceiptAcquisitionTests.connect
+    assertClosed = ReceiptAcquisitionTests.assertClosed
+
+    def response(self, value, **kwargs):
+        for response in self.responses:
+            if not response.closed:
+                response.close()
+        self.responses = [Response(value, **kwargs)]
+        self.addCleanup(self.responses[0].close)
+        self.connections.clear()
+        self.requests.clear()
+
+    def test_current_invocation_resolves_only_workflow_id_not_approval(self):
+        self.response(publisher_policy_values()[0])
+        token = "synthetic_READ_token"
+        self.assertEqual(r.acquire_current_publisher(publisher_context(), token=token), publisher_selection()[0])
+        self.assertEqual([args for args, _ in self.requests], [
+            ("GET", "/repos/kira-manga/kira-source-engine/actions/runs/61/attempts/1")])
+        self.assertEqual(self.requests[0][1]["headers"]["Authorization"], "Bearer " + token)
+        self.assertClosed()
+
+    def test_context_and_response_mismatch_refuse_without_discovering_other_runs(self):
+        cases = [{"GITHUB_RUN_ID": "061"}, {"GITHUB_RUN_ATTEMPT": "2"}, {"GITHUB_REPOSITORY_ID": True},
+                 {"GITHUB_EVENT_NAME": "push"}, {"GITHUB_WORKFLOW_SHA": "0" * 40}, {"approved": "true"}]
+        for change in cases:
+            with self.subTest(context=change), self.assertRaisesRegex(p.Refusal, "^Current publisher acquisition refused$"):
+                r.acquire_current_publisher(publisher_context() | change)
+        self.factory.assert_not_called()
+        for change in ({"id": 62}, {"workflow_id": True}, {"run_attempt": 2}, {"head_sha": "0" * 40},
+                       {"event": "push"}, {"status": "completed", "conclusion": "success"},
+                       {"head_repository": {"id": 74, "full_name": p.REPOSITORY}}):
+            self.response(publisher_policy_values()[0] | change)
+            with self.subTest(response=change), self.assertRaisesRegex(p.Refusal, "^Current publisher acquisition refused$"):
+                r.acquire_current_publisher(publisher_context())
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
+
+    def test_inline_bundle_fixed_subject_get_is_not_native_verification(self):
+        bundle = {"fixture": "UNVERIFIED synthetic bundle", "nested": {"b": 2, "a": 1}}
+        self.response({"attestations": [{"bundle": bundle, "bundle_url": "https://untrusted.invalid/ignored"}]})
+        with mock.patch.object(p, "native_verify") as native:
+            result = r.acquire_attestation_bundle(expected(), token="synthetic_READ_token")
+        self.assertEqual(json.loads(result), bundle)
+        self.assertNotIn(b"synthetic_READ_token", result)
+        self.assertEqual([args for args, _ in self.requests], [
+            ("GET", "/repos/kira-manga/kira-source-engine/attestations/sha256:" + "d" * 64 + "?per_page=1&page=1")])
+        native.assert_not_called()
+        self.assertClosed()
+
+    def test_ambiguous_missing_or_redirected_bundle_refuses_content_free(self):
+        cases = [{}, {"attestations": []}, {"attestations": [{"bundle": {}}]},
+                 {"attestations": [{"bundle_url": "https://untrusted.invalid/private"}]},
+                 {"attestations": [{"bundle": {"a": 1}}] * 2}, {"attestations": [{"bundle": "not-object"}]}]
+        for value in cases:
+            self.response(value)
+            with self.subTest(value=value), self.assertRaisesRegex(p.Refusal, "^Attestation bundle acquisition refused$"):
+                r.acquire_attestation_bundle(expected())
+            self.assertClosed()
+        for status, headers in ((302, {"Location": "https://untrusted.invalid"}),
+                                (200, {"Link": '<https://untrusted.invalid>; rel="next"'}),
+                                (200, {"Content-Length": str(p.MAX_META + 1)})):
+            self.response({}, status=status, headers=headers)
+            with self.assertRaisesRegex(p.Refusal, "^Attestation bundle acquisition refused$"):
+                r.acquire_attestation_bundle(expected())
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
+
+
+class CollectionObservationTests(unittest.TestCase):
+    setUp = ReceiptAcquisitionTests.setUp
+    connect = ReceiptAcquisitionTests.connect
+    assertClosed = ReceiptAcquisitionTests.assertClosed
+
+    def reset(self, value, **kwargs):
+        self.assertClosed()
+        self.responses = [Response(value, **kwargs)]
+        self.connections.clear()
+        self.requests.clear()
+
+    def test_old_object_contract_and_explicit_collection_scope_metadata_are_separate(self):
+        self.reset({"id": 73})
+        self.assertEqual(r._get_json("/repos/" + p.REPOSITORY, "synthetic_read"), {"id": 73})
+        self.reset([{"id": 1001}], headers={"X-OAuth-Scopes": "repo, read:packages"})
+        result = r._get_collection("/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1",
+                                   "synthetic_read", package_read=True)
+        self.assertEqual(result, {"items": [{"id": 1001}], "oauth_scopes": ["read:packages", "repo"]})
+        self.assertNotIn("synthetic_read", json.dumps(result))
+        self.reset([])
+        with self.assertRaisesRegex(p.Refusal, "Receipt object required"):
+            r._get_json("/repos/" + p.REPOSITORY, "synthetic_read")
+        self.assertClosed()
+
+    def test_user_object_observation_checks_classic_read_scope_without_collection_mode(self):
+        self.reset({"id": 81, "login": "synthetic-owner"}, headers={"X-OAuth-Scopes": "read:packages"})
+        result = r.observe_json("/user", "synthetic_read", package_read=True)
+        self.assertEqual(result, {"value": {"id": 81, "login": "synthetic-owner"}, "status": 200,
+                                  "oauth_scopes": ["read:packages"], "stage": "response_validation"})
+        self.assertEqual(self.requests[0][0], ("GET", "/user"))
+        self.assertClosed()
+
+    def test_collection_completeness_and_missing_or_write_capable_scopes_fail_closed(self):
+        cases = [({}, {"X-OAuth-Scopes": "read:packages"}),
+                 ([{}] * 100, {"X-OAuth-Scopes": "read:packages"}), ([], {}),
+                 ([], {"X-OAuth-Scopes": "write:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "delete:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "read:packages,read:packages"}),
+                 ([], {"X-OAuth-Scopes": "repo"}),
+                 ([], {"X-OAuth-Scopes": "read:packages", "Link": '<https://api.github.com/next>; rel="next"'}),
+                 ([], {"X-OAuth-Scopes": "read:packages", "Age": "1"})]
+        for value, headers in cases:
+            with self.subTest(headers=headers):
+                self.reset(value, headers=headers)
+                with self.assertRaises(p.Refusal):
+                    r._get_collection("/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1",
+                                      "synthetic_read", package_read=True)
+                self.assertEqual(len(self.requests), 1)
+                self.assertClosed()
+
+    def test_diagnostics_expose_only_safe_status_and_fixed_stage_without_error_contents(self):
+        for status, headers in ((403, {}), (200, {"Content-Encoding": "gzip"})):
+            self.reset({"message": "synthetic_PRIVATE_body"}, status=status, headers=headers)
+            with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+                r.observe_json("/user", "synthetic_read")
+            self.assertEqual((caught.exception.status, caught.exception.stage), (status, "response_validation"))
+            self.assertEqual(str(caught.exception), "Official receipt observation refused")
+            self.assertTrue(caught.exception.__suppress_context__)
+            self.assertClosed()
+        self.reset({})
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r.observe_json("/user", "synthetic_SECRET\n")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "token_validation"))
+        self.assertEqual(self.requests, [])
+        self.factory.side_effect = OSError("synthetic_PRIVATE_provider")
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r.observe_json("/user", "synthetic_read")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "request"))
+        self.assertEqual(str(caught.exception), "Official receipt observation refused")
+
+    def test_dedicated_audit_gets_only_fifteen_fixed_deleted_targets_with_honest_grants(self):
+        self.assertEqual(len(r.DELETED_PACKAGE_PATHS), 15)
+        for package, path in r.DELETED_PACKAGE_PATHS.items():
+            self.reset([], headers={"X-OAuth-Scopes": "read:packages,delete:packages"})
+            result = r._get_deleted_versions(package, "synthetic_AUDIT")
+            self.assertEqual(result, {"items": [], "oauth_scopes": ["delete:packages", "read:packages"]})
+            self.assertEqual(self.requests[0][0], ("GET", path))
+            self.assertEqual(self.requests[0][1]["headers"]["Authorization"], "Bearer synthetic_AUDIT")
+            self.assertNotIn("synthetic_AUDIT", json.dumps(result))
+            self.assertClosed()
+        self.reset([])
+        for name, token in (("https://untrusted.invalid", "synthetic_AUDIT"), ("/user", "synthetic_AUDIT"),
+                            (next(iter(r.DELETED_PACKAGE_PATHS)), None),
+                            (next(iter(r.DELETED_PACKAGE_PATHS)), "bad token")):
+            with self.subTest(name=name), self.assertRaises(p.Refusal):
+                r._get_deleted_versions(name, token)
+        for path, options in (("/user", {}), (next(iter(r.DELETED_PACKAGE_PATHS.values())), {"package_read": True})):
+            with self.assertRaises(p.Refusal):
+                r._request_json(path, "synthetic_AUDIT", collection=True, metadata_audit=True, **options)
+        self.assertEqual(self.requests, [])
+
+    def test_audit_missing_excess_or_changed_profile_and_incomplete_http_fail_closed(self):
+        name = next(iter(r.DELETED_PACKAGE_PATHS))
+        for scopes in (None, "", "read:packages", "delete:packages", "repo",
+                       "read:packages,delete:packages,write:packages", "read:packages,delete:packages,delete:packages"):
+            self.reset([], headers={} if scopes is None else {"X-OAuth-Scopes": scopes})
+            with self.subTest(scopes=scopes), self.assertRaises(p.Refusal):
+                r._get_deleted_versions(name, "synthetic_AUDIT")
+            self.assertClosed()
+        for value, headers, status in (([{}] * 100, {}, 200), ({}, {}, 200), ([], {}, 403),
+                                      ([], {"Link": '<https://api.github.com/next>; rel="next"'}, 200),
+                                      ([], {"Age": "1"}, 200), ([], {"Content-Encoding": "gzip"}, 200)):
+            self.reset(value, headers={"X-OAuth-Scopes": "read:packages,delete:packages"} | headers, status=status)
+            with self.subTest(status=status, headers=headers), self.assertRaises(r.ReceiptObservationRefusal) as caught:
+                r._get_deleted_versions(name, "synthetic_AUDIT")
+            self.assertEqual((caught.exception.status, caught.exception.stage), (status, "response_validation"))
+            self.assertEqual(str(caught.exception), "Official receipt observation refused")
+            self.assertTrue(caught.exception.__suppress_context__)
+            self.assertEqual(len(self.requests), 1)
+            self.assertClosed()
+        self.reset([])
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r._get_deleted_versions(name, "synthetic_AUDIT\n")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "token_validation"))
+        self.assertEqual(self.requests, [])
+        self.factory.side_effect = OSError("synthetic_PRIVATE_provider")
+        with self.assertRaises(r.ReceiptObservationRefusal) as caught:
+            r._get_deleted_versions(name, "synthetic_AUDIT")
+        self.assertEqual((caught.exception.status, caught.exception.stage), (None, "request"))
+        self.assertEqual(str(caught.exception), "Official receipt observation refused")
 
 
 if __name__ == "__main__":

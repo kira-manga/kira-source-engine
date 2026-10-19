@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kotlin_version": "2.2.21",
+  "host": "macos_arm64",
+  "dependency": "libffi-3.3-1-macos-arm64",
+  "source": {
+    "url": "https://github.com/libffi/libffi/releases/download/v3.3/libffi-3.3.tar.gz",
+    "sha256": "72fba7922703ddfa7a028d513ac15a85c8d54c8d67f55fa5a4802885dc652056",
+    "bytes": 1305466,
+    "archive_root": "libffi-3.3"
+  },
+  "patch": {
+    "url": "https://raw.githubusercontent.com/Homebrew/formula-patches/06252df03c68aee70856e5842f85f20b259e5250/libffi/libffi-3.3-arm64.patch",
+    "sha256": "9290aba7f3131ca19eb28fa7ded836b80f15cf633ffac95dc52b14d0a668d1fa",
+    "bytes": 284504
+  },
+  "cfi_upstream": {
+    "url": "https://github.com/libffi/libffi/commit/8308bed5b2423878aa20d7884a99cf2e30b8daf7.patch",
+    "sha256": "31f311c46fe22b2abed7327596f3d661dff4a5d55b004598669cb574606732d5",
+    "bytes": 1315
+  },
+  "cfi_backport": {
+    "path": "scripts/release/libffi-cfi-startproc.patch",
+    "sha256": "327912eda89bf7820cc34f679cedc76894a4a01246cec6e0ab1382161287cbee",
+    "bytes": 692,
+    "input_sha256": "18dfa7b76ff151afe9fffa792b0fd08ab49242c511c412655ea21d2b98bf14d2",
+    "output_sha256": "9c4eba333b23528497a4b95c9325c1f09e7b2a03d876c9a25a8a4b41f5c3ddf7"
+  },
+  "recipe": {
+    "url": "https://raw.githubusercontent.com/JetBrains/kotlin/2146684dcba708e5a304758b41a9e4ec9c7eff71/kotlin-native/tools/libffi/build_for_macos.sh",
+    "sha256": "2ab10e1f36ff6c1c4353825a9d815e83692abad185a8b1026de2d39d1ae9b502",
+    "bytes": 933
+  },
+  "compiler": {
+    "url": "https://github.com/JetBrains/kotlin/releases/download/v2.2.21/kotlin-native-prebuilt-macos-aarch64-2.2.21.tar.gz",
+    "sha256": "3a35d8ebec146370ad3416e25dcd61e63d31b02642d2f5639b54a370a7b31134",
+    "bytes": 253527505,
+    "archive_root": "kotlin-native-prebuilt-macos-aarch64-2.2.21"
+  },
+  "provenance": "The upstream libffi 3.3 source digest also matches NixOS/nixpkgs 20.09 pkgs/development/libraries/libffi/default.nix (0mi0cpf8aa40ljjmzxb7im6dbj45bb0kllcd09xgmp834y9agyvj). The Homebrew patch and build recipe are commit-pinned official Kotlin 2.2.21 inputs. The additional reviewed CFI backport implements only the three cfi_startproc/entry-label ordering fixes from libffi upstream commit 8308bed5b2423878aa20d7884a99cf2e30b8daf7 (PR857, issue852) for current Apple assemblers; input and output src/aarch64/sysv.S hashes are pinned. It does not disable unwind information or change ABI/instructions. The compiler digest is the official GitHub v2.2.21 release asset digest. The resulting library is built on the hosted Apple ARM64 runner, not a JetBrains-signed or byte-identical prebuilt. No disputed prebuilt libffi archive is accepted."
+}
