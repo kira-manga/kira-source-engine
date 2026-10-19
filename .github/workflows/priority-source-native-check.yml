@@ -354,3 +354,41 @@ jobs:
               provenance.unlink()
           print('Owned local qualification evidence removed; no shared cache, package or source publication changed.')
           PY
+
+  readonly-boundary-diagnostic:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          github.repository == 'kira-manga/kira-source-engine' &&
+          github.ref == 'refs/heads/remediation/engine-boundary-diagnostic-20261019' &&
+          github.workflow_sha == github.sha }}
+    permissions:
+      contents: read
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: 9af6800394af9f666463dc58ae675c293e5780a2
+          path: producer
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Diagnose original first Maven index; no Gradle or writer credential
+        env:
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s control/.github/scripts/diagnose_native_boundary.py
+      - name: Preserve only bounded nonsecret diagnosis
+        id: diagnosis
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: readonly-boundary-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kira-boundary-diagnostic.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Remove only preserved projection
+        if: ${{ always() && steps.diagnosis.outcome == 'success' }}
+        run: rm -f -- "$RUNNER_TEMP/kira-boundary-diagnostic.json"
