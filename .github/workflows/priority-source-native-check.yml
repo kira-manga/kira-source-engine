@@ -363,9 +363,8 @@ jobs:
           github.workflow_sha == github.sha }}
     permissions:
       contents: read
-      actions: read
     runs-on: macos-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -393,22 +392,12 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('root=' + str(root) + '\n')
           PY
-      - name: Download only the selected genuine 0.2.3 producer archive
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          repository: kira-manga/kira-source-engine
-          run-id: 39190022581
-          artifact-ids: 12159789360
-          github-token: ${{ github.token }}
-          path: ${{ steps.inputs.outputs.root }}/artifact
-          merge-multiple: true
-      - name: Diagnose original all-index and candidate-path reads; no Gradle or write credential
-        timeout-minutes: 11
+      - name: Diagnose original system-Python startup only; invalid request and no credentials
+        timeout-minutes: 2
         env:
           KIRA_BOUNDARY_ROOT: ${{ steps.inputs.outputs.root }}
-          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
         run: /usr/bin/python3 -B -E -s control/.github/scripts/diagnose_native_boundary.py
-      - name: Always remove only this run's downloaded archive and scratch
+      - name: Always remove only this run's copied helpers and scratch
         if: ${{ always() && steps.inputs.outputs.root != '' }}
         timeout-minutes: 1
         env:
@@ -434,7 +423,7 @@ jobs:
           if report.exists():
               assert report.is_file() and report.stat().st_size <= 256 * 1024
               value = json.loads(report.read_text())
-          value['owned_download_removed'] = True
+          value['owned_inputs_removed'] = True
           report.write_text(json.dumps(value, indent=2) + '\n')
           PY
       - name: Preserve only bounded nonsecret diagnosis
