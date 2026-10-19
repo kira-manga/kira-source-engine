@@ -300,6 +300,30 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                                                  write_username="synthetic-owner", write_token=write)
             user.assert_not_called()
 
+    def test_native_controller_and_metadata_audit_share_one_fixed_finite_deadline(self):
+        runtime, _ = self.job("recheck")
+        env = workflow.runtime_environment(runtime, {"JAVA_HOME": "/fixture/java", "GITHUB_ACTIONS": "true",
+                                                    "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64"})
+        process = mock.Mock(pid=4321, returncode=0)
+        with mock.patch.object(workflow.subprocess, "Popen", return_value=process) as launch, \
+                mock.patch.object(workflow, "MetadataAudit") as audit_factory, \
+                mock.patch.object(workflow, "native_output", return_value=7) as output, \
+                mock.patch.object(workflow.time, "monotonic", side_effect=[50.0, 80.0]), \
+                mock.patch.object(workflow.os, "killpg"), \
+                mock.patch.object(workflow.owned_helpers(), "stop_owned") as stop:
+            audit = SimpleNamespace(calls=16)
+            audit_factory.return_value.__enter__.return_value = audit
+            result = workflow.run_native(runtime, env, workflow.guarded_command(runtime, self.selection, self.metadata, "a" * 64),
+                                         self.credentials, selected=self.selection, audit_token=self.audit_token)
+            audit_factory.assert_called_once_with(runtime, self.selection, self.audit_token, 2150.0)
+            self.assertEqual(output.call_args.args[3], 2150.0)
+            self.assertIs(output.call_args.args[4], audit)
+            self.assertEqual(result, {"exit_code": 0, "seconds": 30.0, "output_bytes": 7})
+            self.assertNotIn(self.audit_token, repr(launch.call_args))
+            stop.assert_called_once_with(runtime, env, "native")
+            process.stdout.close.assert_called_once()
+        workflow.cleanup(runtime)
+
     def test_native_failure_redacts_split_secrets_and_stops_only_owned_group_and_home(self):
         temporary = tempfile.TemporaryDirectory(prefix="kira-audit-", dir=Path("/tmp").resolve(strict=True))
         self.addCleanup(temporary.cleanup)
@@ -319,15 +343,17 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                     mock.patch.object(workflow.selectors, "DefaultSelector") as factory, \
                     mock.patch.object(workflow.os, "read", side_effect=chunks), \
                     mock.patch.object(workflow.os, "killpg") as kill, \
-                    mock.patch.object(workflow.time, "monotonic", side_effect=[0, 1201] if timeout else None, return_value=1), \
+                    mock.patch.object(workflow.time, "monotonic", side_effect=[0, 2101] if timeout else None, return_value=1), \
                     mock.patch.object(workflow.owned_helpers(), "stop_owned") as stop:
                 selector = factory.return_value.__enter__.return_value
                 selector.get_map.side_effect = lambda: {17: True} if live else {}
                 selector.select.return_value = [(SimpleNamespace(fd=17, fileobj=process.stdout), workflow.selectors.EVENT_READ)]
                 selector.unregister.side_effect = lambda _: live.clear()
-                with self.subTest(timeout=timeout), self.assertRaises(policy.Refusal):
+                with self.subTest(timeout=timeout), self.assertRaises(policy.Refusal) as failure:
                     workflow.run_native(runtime, env, workflow.guarded_command(runtime, self.selection, self.metadata, "a" * 64),
                                          self.credentials, selected=self.selection, audit_token=self.audit_token)
+                if timeout:
+                    self.assertEqual(str(failure.exception), "Native publication time bound exceeded")
                 child = launch.call_args.kwargs["env"]
                 self.assertTrue(launch.call_args.kwargs["start_new_session"])
                 self.assertNotIn("GH_TOKEN", child)

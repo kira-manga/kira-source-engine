@@ -53,7 +53,7 @@ the existing SDK's API37 metadata and `android.jar`, accepting real `android-37`
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
 publication components and Kotlin/API levels are unchanged. The committed
-`VERSION_NAME=0.2.5` is a **prospective engineering candidate, not a reserved or published
+`VERSION_NAME=0.2.6` is a **prospective engineering candidate, not a reserved or published
 version**; no tag or consumer pin changes with it. Historical version tags must not be moved
 to admit changed helper bytes. CI's candidate/noncandidate distinction
 is described below.
@@ -199,7 +199,7 @@ internal presence API (never credential values); no internal/custom publisher is
 
 ## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed prospective version is `0.2.5`, not reserved or published.** PRs remain
+**The committed prospective version is `0.2.6`, not reserved or published.** PRs remain
 check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
 produced** and skip export, candidate artifact upload and attestation. Diagnostics are
 still retained. A green PR is not a producer receipt. An exact eligible integration push
@@ -717,6 +717,11 @@ Darwin interpreter/process boundary still require actual hosted qualification.
 The caller captures bounded credential-redacted native logs, stops only its owned Gradle
 workers immediately, then finalizes provenance before uploading diagnostics (three-day
 retention). Only after evidence capture does receipt-gated cleanup remove its owned outputs.
+Native output and the controller-held metadata audit share one fixed35-minute monotonic
+deadline for all fifteen guarded writers and final readback. Existing per-helper/HTTP/IPC
+bounds and the outer42-minute work step/55-minute job remain unchanged. Deadline checks
+are cooperative during a bounded synchronous audit group; this is not a worst-case promise
+that every slow request and cleanup fits. The selected finite release window remains required.
 A failed/partial upload is never retried, overwritten, deleted or reported as no writes;
 complete readback is required even when Gradle exits0. A finite window is not a claim that
 an authorized administrator is technically unable to change their own repository.

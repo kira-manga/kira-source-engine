@@ -413,15 +413,16 @@ def run_native(runtime, env, command, credentials, *, selected, audit_token):
                       package_token=credentials["KIRA_MAVEN_READ_TOKEN"], write_token=credentials["KIRA_MAVEN_WRITE_TOKEN"])
     write_private(runtime.root / "diagnostics/native-command.json", encoded(command))
     process, started = None, time.monotonic()
+    deadline = started + 2100  # One fixed budget for all native guards/actions and the final readback.
     try:
         path = runtime.root / "diagnostics/native.log"
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log, \
-                MetadataAudit(runtime, selected, audit_token, started + 1200) as audit:
+                MetadataAudit(runtime, selected, audit_token, deadline) as audit:
             child = owned_helpers().child_environment(runtime, env) | runtime.context
             child.update({key: env[key] for key in ("GITHUB_ACTIONS", "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP")})
             process = subprocess.Popen(command, cwd=runtime.producer, env=child | credentials, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-            count = native_output(process, log, credentials, started + 1200, audit)
+            count = native_output(process, log, credentials, deadline, audit)
             policy.require(process.returncode == 0, "Native publication failed; partial remote state may exist")
             policy.require(audit.calls == 16, "Complete native metadata-audit sequence required")
         return {"exit_code": 0, "seconds": round(time.monotonic() - started, 3), "output_bytes": count}
