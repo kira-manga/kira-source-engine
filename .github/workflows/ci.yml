@@ -87,13 +87,14 @@ jobs:
           TMPDIR: ${{ env.KIRA_CI_ROOT }}/tmp
         run: python3 -B -m unittest discover -s .github/scripts -p 'test_publication_policy.py' -v
 
-      - name: Test controller metadata custody on the actual Darwin host
+      - name: Test controller metadata custody and native CLI on the actual Darwin host
         timeout-minutes: 2
         shell: bash
         run: |
           set -euo pipefail
           PYTHONPATH=.github/scripts python3 -B -m unittest -v \
             test_publisher_workflow.MetadataAuditCustodyTests \
+            test_publisher_publication_intake.NativeBoundaryCliTests \
             2>&1 | tee "$KIRA_CI_ROOT/diagnostics/metadata-audit-ipc.log"
 
       - name: Require existing SDK37 metadata and android.jar (37 or 37.0 layout)
