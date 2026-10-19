@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import tempfile
 import time
 from unittest import mock
 import unittest
@@ -477,6 +479,141 @@ class PublisherWriterBoundaryTests(fixtures.OwnedFixture):
             publisher.native_boundary(request)
         verify.assert_not_called()
         self.assertEqual(self.requests, [])
+
+
+class NativeBoundaryCliTests(unittest.TestCase):
+    BASE_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/synthetic-owned",
+                "TMPDIR": "/synthetic-owned", "LANG": "C", "LC_ALL": "C"}
+    LAUNCHER_ENV = {name: "synthetic_DISCARDED_value" for name in (
+        "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING")}
+
+    def test_darwin_discards_only_launcher_values_before_reading_or_handling_input(self):
+        error = io.StringIO()
+        environments = []
+
+        def read(size):
+            environments.append(("read", dict(os.environ)))
+            return b"{}"
+
+        def handle(request):
+            environments.append(("boundary", dict(os.environ)))
+            raise policy.Refusal("Synthetic malformed request")
+
+        with mock.patch.object(publisher.sys, "platform", "darwin"), \
+                mock.patch.dict(os.environ, self.BASE_ENV | self.LAUNCHER_ENV, clear=True), \
+                mock.patch.object(publisher.sys, "stdin") as stdin, \
+                mock.patch.object(publisher, "native_boundary", side_effect=handle) as boundary, redirect_stderr(error):
+            stdin.buffer.read.side_effect = read
+            self.assertEqual(publisher.main([]), 1)
+            stdin.buffer.read.assert_called_once_with(policy.MAX_META + 1)
+            boundary.assert_called_once_with({})
+        self.assertEqual(environments, [("read", self.BASE_ENV), ("boundary", self.BASE_ENV)])
+        self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_darwin_still_refuses_arguments_and_every_other_ambient_custody_name_before_input(self):
+        names = ("GITHUB_TOKEN", "KIRA_MAVEN_WRITE_TOKEN", "KIRA_PACKAGES_METADATA_AUDIT_TOKEN",
+                 "KIRA_PUBLICATION_API_READ_TOKEN", "KIRA_MAVEN_READ_TOKEN", "KIRA_PACKAGES_READ_TOKEN",
+                 "PYTHONPATH", "DYLD_LIBRARY_PATH", "GIT_CONFIG_GLOBAL", "SDKROOT_EXTRA")
+        cases = [([], {name: "synthetic_SECRET_value"}) for name in names] + [(["synthetic_SECRET_argument"], {})]
+        for arguments, extra in cases:
+            with self.subTest(arguments=bool(arguments), names=list(extra)):
+                error = io.StringIO()
+                with mock.patch.object(publisher.sys, "platform", "darwin"), \
+                        mock.patch.dict(os.environ, self.BASE_ENV | self.LAUNCHER_ENV | extra, clear=True), \
+                        mock.patch.object(publisher.sys, "stdin") as stdin, \
+                        mock.patch.object(publisher, "native_boundary") as boundary, redirect_stderr(error):
+                    self.assertEqual(publisher.main(arguments), 1)
+                    boundary.assert_not_called()
+                    stdin.buffer.read.assert_not_called()
+                    if arguments:
+                        self.assertTrue(set(self.LAUNCHER_ENV) <= set(os.environ))
+                self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_non_darwin_never_discards_or_admits_the_launcher_names(self):
+        for platform in ("linux", "win32"):
+            for name, value in self.LAUNCHER_ENV.items():
+                with self.subTest(platform=platform, name=name):
+                    error = io.StringIO()
+                    environment = self.BASE_ENV | {name: value}
+                    with mock.patch.object(publisher.sys, "platform", platform), \
+                            mock.patch.dict(os.environ, environment, clear=True), \
+                            mock.patch.object(publisher.sys, "stdin") as stdin, \
+                            mock.patch.object(publisher, "native_boundary") as boundary, redirect_stderr(error):
+                        self.assertEqual(publisher.main([]), 1)
+                        self.assertEqual(dict(os.environ), environment)
+                        boundary.assert_not_called()
+                        stdin.buffer.read.assert_not_called()
+                    self.assertEqual(error.getvalue(), "Native publisher boundary refused. No release authority.\n")
+
+    def test_real_system_python_clean_cli_reaches_malformed_request_without_network(self):
+        source = Path(__file__).resolve().parent
+        names = ("publisher_publication_intake.py", "remote_maven_readback.py", "publication_policy.py",
+                 "github_publication_receipts.py", "connected_publication_intake.py")
+        with tempfile.TemporaryDirectory(prefix="kira-native-cli-") as temporary:
+            root = Path(temporary).resolve(strict=True)
+            scripts = root / "scripts"
+            scripts.mkdir(mode=0o700)
+            for name in names:
+                target = scripts / name
+                target.write_bytes((source / name).read_bytes())
+                target.chmod(0o600)
+            driver = root / "probe.py"
+            driver.write_text(self.CLI_PROBE, encoding="utf-8")
+            driver.chmod(0o600)
+            environment = self.BASE_ENV | {"HOME": str(root), "TMPDIR": str(root)}
+            result = subprocess.run(["/usr/bin/python3", "-B", "-E", "-s", str(driver)], input=b"{}",
+                                    env=environment, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            self.assertEqual(result.returncode, 0)
+            self.assertLessEqual(len(result.stdout), 4096)
+            self.assertEqual(result.stderr, b"Native publisher boundary refused. No release authority.\n")
+            self.assertEqual(json.loads(result.stdout), {"main": True, "boundary": True, "clean": True,
+                                                       "removed": True, "schema_refused": True, "exit": 1,
+                                                       "network": 0, "subprocess": 0})
+        self.assertFalse(root.exists())
+
+    CLI_PROBE = r'''import json, os, pathlib, runpy, sys
+scripts = pathlib.Path(__file__).parent / 'scripts'
+target = str(scripts / 'publisher_publication_intake.py')
+allowed = {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'}
+discarded = {'CPATH', 'LIBRARY_PATH', 'MANPATH', 'SDKROOT', '__CF_USER_TEXT_ENCODING'}
+report = dict(main=False, boundary=False, clean=False, removed=False, schema_refused=False,
+              exit=None, network=0, subprocess=0)
+
+def audit(event, args):
+    if event.startswith('socket.'):
+        report['network'] += 1
+        raise RuntimeError('Test network forbidden')
+    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'):
+        report['subprocess'] += 1
+        raise RuntimeError('Test subprocess forbidden')
+
+def trace(frame, event, arg):
+    if frame.f_code.co_filename != target:
+        return None
+    function = frame.f_code.co_name
+    if event == 'call' and function == 'main':
+        report['main'] = True
+    if event == 'call' and function == 'native_boundary':
+        report['boundary'] = True
+        report['clean'] = set(os.environ) <= allowed
+        report['removed'] = not (set(os.environ) & discarded)
+    if event == 'exception' and function == 'native_boundary' and arg[0].__name__ == 'Refusal':
+        report['schema_refused'] = True
+    return trace
+
+sys.addaudithook(audit)
+sys.path.insert(0, str(scripts))
+sys.settrace(trace)
+try:
+    runpy.run_path(target, run_name='__main__')
+except SystemExit as error:
+    report['exit'] = error.code if type(error.code) is int else None
+except BaseException:
+    pass
+finally:
+    sys.settrace(None)
+sys.stdout.write(json.dumps(report))
+'''
 
 
 class NativeAttachmentSourceTests(unittest.TestCase):

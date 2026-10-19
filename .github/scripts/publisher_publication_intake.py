@@ -405,6 +405,11 @@ def main(argv=None):
     """Only sanitized stdin is supported: no tokens, paths or JSON in command arguments."""
     try:
         policy.require(not (sys.argv[1:] if argv is None else argv), "Boundary arguments refused")
+        if sys.platform == "darwin":
+            # The fixed system launcher adds these names to the caller's clean env.
+            # Discard their values; they are not admitted helper inputs.
+            for name in ("CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"):
+                os.environ.pop(name, None)
         policy.require(set(os.environ) <= {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"},
                        "Unsanitized boundary environment refused")
         data = sys.stdin.buffer.read(policy.MAX_META + 1)

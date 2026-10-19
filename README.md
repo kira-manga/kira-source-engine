@@ -53,7 +53,7 @@ the existing SDK's API37 metadata and `android.jar`, accepting real `android-37`
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
 publication components and Kotlin/API levels are unchanged. The committed
-`VERSION_NAME=0.2.3` is a **prospective engineering candidate, not a reserved or published
+`VERSION_NAME=0.2.4` is a **prospective engineering candidate, not a reserved or published
 version**; no tag or consumer pin changes with it. Historical version tags must not be moved
 to admit changed helper bytes. CI's candidate/noncandidate distinction
 is described below.
@@ -199,7 +199,7 @@ internal presence API (never credential values); no internal/custom publisher is
 
 ## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed prospective version is `0.2.3`, not reserved or published.** PRs remain
+**The committed prospective version is `0.2.4`, not reserved or published.** PRs remain
 check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
 produced** and skip export, candidate artifact upload and attestation. Diagnostics are
 still retained. A green PR is not a producer receipt. An exact eligible integration push
@@ -626,6 +626,10 @@ Separate `KIRA_PUBLICATION_API_READ_TOKEN` and `KIRA_MAVEN_READ_USERNAME`/`KIRA_
 are sent to the fixed helper through bounded stdin, never argv or files. Read tokens equal to
 the write token refuse. The helper uses fixed `/usr/bin/python3`, a cleared environment,
 owned temporary HOME/TMPDIR, no user Python site, deadline/worker termination and owned cleanup.
+On Darwin only, the CLI discards the observed system-launcher additions `CPATH`, `LIBRARY_PATH`,
+`MANPATH`, `SDKROOT` and `__CF_USER_TEXT_ENCODING` after argument validation, before reading stdin.
+Their values are never used. They are not added to the strict helper environment allowlist;
+every other unexpected name still refuses, and these five names also refuse on other platforms.
 Before handing over read custody, credential-free fixed `/usr/bin/git ls-tree` binds the five
 helper/import files to the selected producer commit. Only the exact verified bytes run from a
 private temporary snapshot; mutable checkout imports, Git replacement/lazy-fetch/protocols,
@@ -663,8 +667,10 @@ outcome closes/unlinks the owned socket and follows the existing native worker-s
 This is a same-UID private runner boundary, not protection from a compromised host. Existing
 HTTPS DNS resolution still has no separate hard deadline. New helper bytes require a new
 genuine producer/seal and actual platform qualification, not overlaying an old cohort.
-The existing Darwin CI runs the focused IPC class before bootstrap, retaining its log;
-its disposable test-only roots use resolved `/tmp` so the100-byte production socket bound
+The existing Darwin CI runs the focused IPC and native CLI classes before bootstrap, retaining their log;
+the latter launches the real system interpreter with a clean environment and malformed `{}` input,
+requiring request-schema refusal rather than startup refusal, with network/subprocess activity forbidden.
+The IPC class's disposable test-only roots use resolved `/tmp` so the100-byte production socket bound
 is not weakened to accommodate a long runner TMPDIR. This is not live credential proof.
 
 At each writer the helper rereads source/archive, fresh official producer/publisher/protection
