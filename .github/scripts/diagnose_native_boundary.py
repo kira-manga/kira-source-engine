@@ -1,5 +1,6 @@
 """One read-only historical-boundary diagnosis; never a publication/approval result."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -40,8 +41,19 @@ def main():
         username = account['login']
         remote.read_credentials(username, package_token)
         allowed = {str(source / '.github/scripts' / name): name for name in HELPERS}
+        index_hashes = {}
         def trace(frame, event, arg):
             name = allowed.get(frame.f_code.co_filename)
+            if name == 'remote_maven_readback.py' and event == 'call' and frame.f_code.co_name == '_index':
+                body = frame.f_locals['body']
+                index_hashes.update({algorithm: hashlib.new(algorithm, body, usedforsecurity=False).hexdigest()
+                                     for algorithm in remote.policy.ALGORITHMS})
+            if name == 'remote_maven_readback.py' and event == 'exception' and frame.f_code.co_name == '_children':
+                element = frame.f_locals['element']
+                tags = {'metadata', 'groupId', 'artifactId', 'versioning', 'latest', 'release', 'versions', 'version', 'lastUpdated'}
+                report['structure'] = {'parent': element.tag if element.tag in tags else 'other',
+                                       'child_count': len(element), 'attribute_count': len(element.attrib),
+                                       'children': [child.tag if child.tag in tags else 'other' for child in list(element)[:32]]}
             if name and event == 'exception' and len(report['exceptions']) < 64:
                 kind = arg[0].__name__
                 if kind not in ('StopIteration', 'GeneratorExit'):
@@ -60,13 +72,27 @@ def main():
                         report['http'].append(value)
             return trace
         report['phase'] = 'first-authenticated-maven-index'
+        budget = remote._Budget()
         sys.settrace(trace)
         try:
-            observed = remote._read_index('source-contract-android', (username, package_token), remote._Budget())
+            observed = remote._read_index('source-contract-android', (username, package_token), budget)
             report['index'] = {key: observed[key] for key in ('size', 'sha256')}
             report['result'] = 'index-and-four-sidecars-matched; NOT whole boundary or release acceptance'
         except Exception:
             report['result'] = 'refused; inspect fixed source lines, no cause guessed'
+            # Separate read-only sidecar compatibility observation, NOT parser acceptance.
+            # Reuse the exact received XML digests; never fetch another body or invent bytes.
+            report['sidecars'] = {}
+            probes = index_hashes if report['logical_reads'] == 1 else {}
+            for algorithm, digest in probes.items():
+                try:
+                    path = 'me/manga/kira/source/source-contract-android/maven-metadata.xml.' + algorithm
+                    actual, _ = remote._read(path, (username, package_token), len(digest), budget)
+                    matches = actual['size'] == len(digest) and actual['sha256'] == remote.policy.digest(digest.encode('ascii'))
+                    report['sidecars'][algorithm] = 'matched' if matches else 'mismatched'
+                except Exception:
+                    report['sidecars'][algorithm] = 'refused'
+            report['index_sha256'] = index_hashes.get('sha256')
         finally:
             sys.settrace(None)
     except Exception:
