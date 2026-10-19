@@ -14,11 +14,12 @@ import test_github_publication_receipts as http_fixtures
 import test_publication_policy as fixtures
 
 
-def index_bytes(artifact, versions, timestamp="20261017000000"):
+def index_bytes(artifact, versions, timestamp="20261017000000", *, with_release=True):
     values = "".join("<version>" + version + "</version>" for version in versions)
+    release = f"<release>{versions[-1]}</release>" if with_release else ""
     return (f'<?xml version="1.0" encoding="UTF-8"?>\n<metadata><groupId>{policy.GROUP}</groupId>'
             f'<artifactId>{artifact}</artifactId><versioning><latest>{versions[-1]}</latest>'
-            f'<release>{versions[-1]}</release><versions>{values}</versions>'
+            f'{release}<versions>{values}</versions>'
             f'<lastUpdated>{timestamp}</lastUpdated></versioning></metadata>\n').encode()
 
 
@@ -101,10 +102,10 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         for algorithm in policy.ALGORITHMS:
             self.objects[path + "." + algorithm] = hashlib.new(algorithm, data, usedforsecurity=False).hexdigest().encode()
 
-    def publish_indexes(self, completed):
+    def publish_indexes(self, completed, *, with_release=True):
         for identity, value in self.publications.items():
             versions = self.prior_versions + ([fixtures.RELEASE] if identity in completed else [])
-            self.set_index(identity, index_bytes(value["artifact"], versions))
+            self.set_index(identity, index_bytes(value["artifact"], versions, with_release=with_release))
 
     def connect(self, host, *, timeout, context):
         self.assertIn(host, (remote.HOST, remote.STORAGE_HOST))
@@ -188,6 +189,142 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         self.set_index(pending, index_bytes(self.publications[pending]["artifact"], self.prior_versions + ["9.9.9"]))
         with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
             self.verify(before, completed)
+
+    def test_absent_release_and_origin_sha2_checksums_preserve_progress_and_final_full_readback(self):
+        self.publish_indexes([], with_release=False)
+        for identity in self.identities:
+            for algorithm in ("sha256", "sha512"):
+                self.status[self.index_path(identity) + "." + algorithm] = 404
+        before = self.before()
+        for identity, observed in before.items():
+            self.assertEqual(set(observed), {"versions", "latest", "release", "last_updated", "size", "sha256"})
+            self.assertIsNone(observed["release"])
+            self.assertEqual(observed["sha256"], policy.digest(self.objects[self.index_path(identity)]))
+        first, second = self.identities[:2]
+        self.publish_indexes([first], with_release=False)
+        progress = self.verify(before, [first])
+        self.publish_indexes([first, second], with_release=False)
+        count = len(self.requests)
+        progress = remote.verify_remote(self.inventory, fixtures.RELEASE, before, [first, second],
+                                        username="reader", token="synthetic_read", progress=progress)
+        self.assertEqual(progress["completed"], [first, second])
+        self.assertEqual(len(self.requests) - count, len(self.publications[second]["rows"]) + 15 * 5)
+        self.publish_indexes(self.identities, with_release=False)
+        count = len(self.requests)
+        result = self.verify(before)  # Finalizer still rereads all immutable rows, not the progress cache.
+        self.assertEqual(len(self.requests) - count, len(policy.text_lines(self.inventory)) + 15 * 5)
+        self.assertEqual(result["completed"], self.identities)
+        self.assertEqual(result["inventory_sha256"], policy.digest(self.inventory))
+        for identity, observed in result["indexes"].items():
+            self.assertIsNone(observed["release"])
+            self.assertEqual(observed["versions"], self.prior_versions + [fixtures.RELEASE])
+            self.assertEqual(observed["latest"], fixtures.RELEASE)
+            self.assertEqual(observed["sha256"], policy.digest(self.objects[self.index_path(identity)]))
+        self.assertTrue(all(response.read_count == 0 for response in self.responses if response.status == 404))
+
+    def test_release_presence_can_be_added_on_completion_but_not_lost_or_rewritten_after_readback(self):
+        self.publish_indexes([], with_release=False)
+        before = self.before()
+        self.publish_indexes(self.identities)
+        result = self.verify(before)
+        self.assertTrue(all(item["release"] == fixtures.RELEASE for item in result["indexes"].values()))
+        self.publish_indexes([])
+        present = self.before()
+        self.publish_indexes(self.identities, with_release=False)
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
+            self.verify(present)  # A real prior release marker must not disappear.
+        first, pending = self.identities[0], self.identities[-1]
+        self.publish_indexes([first], with_release=False)
+        progress = self.verify(before, [first])
+        self.set_index(first, index_bytes(self.publications[first]["artifact"], self.prior_versions + [fixtures.RELEASE]))
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
+            remote.verify_remote(self.inventory, fixtures.RELEASE, before, [first],
+                                 username="reader", token="synthetic_read", progress=progress)
+        self.publish_indexes([first], with_release=False)
+        self.set_index(pending, index_bytes(self.publications[pending]["artifact"], self.prior_versions))
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
+            self.verify(before, [first])  # Pending None-versus-present state is also immutable.
+        count = len(self.requests)
+        for release in ("", "9.9.9", False):
+            invalid = copy.deepcopy(before)
+            invalid[first]["release"] = release
+            with self.subTest(release=release), self.assertRaises(policy.Refusal):
+                self.verify(invalid, [])
+        invalid = copy.deepcopy(before)
+        del invalid[first]["release"]
+        with self.assertRaises(policy.Refusal):
+            self.verify(invalid, [])
+        self.assertEqual(len(self.requests), count)
+
+    def test_optional_index_sha2_origin_absence_does_not_hide_status_framing_hash_or_timeout_failures(self):
+        for algorithm in ("sha256", "sha512"):
+            path = self.index_path(self.identities[0]) + "." + algorithm
+            self.status[path] = 404
+            self.before()
+            for headers in ([("Age", "1")], [("Content-Encoding", "gzip")],
+                            [("Location", "https://untrusted.invalid/checksum")],
+                            [("Content-Length", "1"), ("content-length", "1")],
+                            [("Content-Length", "1"), ("Transfer-Encoding", "chunked")],
+                            [("Transfer-Encoding", "gzip")], [("Content-Length", str(remote.INDEX_LIMIT + 1))]):
+                self.headers[path] = headers
+                with self.subTest(algorithm=algorithm, headers=headers), self.assertRaises(policy.Refusal):
+                    self.before()
+                self.assertEqual(self.responses[-1].read_count, 0)
+            self.headers.pop(path)
+            for status in (301, 304, 401, 403, 500):
+                self.status[path] = status
+                with self.subTest(algorithm=algorithm, status=status), self.assertRaises(policy.Refusal):
+                    self.before()
+            self.status.pop(path)
+            target = self.redirect(path)
+            self.status[target] = 404
+            with self.assertRaises(policy.Refusal):
+                self.before()  # A storage404 cannot be treated as the authenticated origin's absence.
+            self.assertEqual(self.requests[-1], (remote.STORAGE_HOST, target))
+            self.status.pop(target)
+            self.status.pop(path)
+            self.headers.pop(path)
+            original = self.objects[path]
+            for data in (original[:-1], original + b"\n", b"x" * len(original)):
+                self.objects[path] = data
+                with self.subTest(algorithm=algorithm, size=len(data)), self.assertRaises(policy.Refusal):
+                    self.before()
+            self.objects[path] = original
+
+            def timeout_on_checksum():
+                if self.requests[-1] == (remote.HOST, remote.PREFIX + path):
+                    raise TimeoutError("synthetic_provider_detail")
+
+            self.on_read = timeout_on_checksum
+            with self.assertRaisesRegex(policy.Refusal, "^Remote pre-write index observation refused$") as refused:
+                self.before()
+            self.assertTrue(refused.exception.__suppress_context__)
+            self.on_read = None
+
+    def test_optional_checksum_mode_is_exact_mutable_sha2_only_and_required_immutable_bytes_still_refuse(self):
+        index = self.index_path(self.identities[0])
+        immutable = next(path for path, _, _ in self.publications[self.identities[0]]["rows"] if path.endswith(".sha256"))
+        cases = [(index, 64, {}), (index + ".md5", 32, {}), (index + ".sha1", 40, {}),
+                 (immutable, 64, {}), (index.replace("/maven-", "/1.2.3/maven-") + ".sha256", 64, {}),
+                 (index.replace("source-", "unknown-", 1) + ".sha256", 64, {}),
+                 (index + ".sha256", 63, {}), (index + ".sha512", 64, {}),
+                 (index + ".sha256", 64, {"capture": True}), (index + ".sha256", 0, {"absent": True}),
+                 (index + ".sha256", 64, {"optional_index_checksum": 1})]
+        for path, limit, options in cases:
+            with self.subTest(path=path, options=options), self.assertRaises(policy.Refusal):
+                remote._read(path, ("reader", "synthetic_read"), limit, remote._Budget(),
+                             **{"optional_index_checksum": True, **options})
+        self.http.assert_not_called()
+        for path in (index, index + ".md5", index + ".sha1"):
+            self.status[path] = 404
+            with self.subTest(required=path), self.assertRaises(policy.Refusal):
+                self.before()
+            self.status.pop(path)
+        before = self.before()
+        self.publish_indexes(self.identities)
+        self.status[immutable] = 404
+        with self.assertRaisesRegex(policy.Refusal, "^Remote native readback refused$"):
+            self.verify(before)
 
     def test_each_boundary_reads_new_completion_once_but_final_readback_ignores_progress(self):
         before = self.before()
@@ -401,6 +538,14 @@ class RemoteMavenReadbackTests(unittest.TestCase):
         cases = [original.replace(b"<metadata>", b'<metadata unknown="x">'),
                  original.replace(b"</metadata>", b"<unknown/></metadata>"),
                  original.replace(b"<groupId>", b"<groupId/><groupId>"),
+                 original.replace(b"</versioning>", b"<unknown/></versioning>"),
+                 original.replace(b"<release>", b"<release/><release>"),
+                 original.replace(b"<release>0.1.2</release>", b"<release/>"),
+                 original.replace(b"<release>", b'<release attribute="x">'),
+                 original.replace(b"<release>0.1.2</release>", b"<release><version>0.1.2</version></release>"),
+                 original.replace(b"<release>0.1.2</release>", b"<release>9.9.9</release>"),
+                 original.replace(b"<latest>0.1.2</latest>", b""),
+                 original.replace(b"<lastUpdated>20261017000000</lastUpdated>", b""),
                  original.replace(b"</versions>", b"<version>0.1.0</version></versions>"),
                  original.replace(b"20261017000000", b"20261399000000"),
                  original.replace(b"<metadata>", b'<!DOCTYPE metadata [<!ENTITY test SYSTEM "file:///not-read">]><metadata>'),

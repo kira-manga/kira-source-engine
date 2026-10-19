@@ -25,6 +25,11 @@ INDEX_LIMIT = 4 * 1024 * 1024
 LOCATION_LIMIT = 8192
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
 AUDIT_PROFILE = "classic-read-delete-packages"
+OPTIONAL_INDEX_CHECKSUMS = {
+    policy.GROUP.replace(".", "/") + "/" + module + suffix + "/maven-metadata.xml." + algorithm: size
+    for module in policy.MODULES for suffix in policy.PUBLICATIONS.values()
+    for algorithm, size in (("sha256", 64), ("sha512", 128))
+}
 
 
 def read_credentials(username, token):
@@ -64,12 +69,15 @@ def _storage_target(response):
     return match.group(1)
 
 
-def _read(path, credentials, limit, budget, *, capture=False, absent=False):
+def _read(path, credentials, limit, budget, *, capture=False, absent=False, optional_index_checksum=False):
     """One credential-free storage hop only; no retries, token discovery or decoding."""
     target = _path(path)
     username, token = read_credentials(*credentials)
     policy.require(type(limit) is int and 0 <= limit <= policy.MAX_BYTES, "Remote byte bound refused")
     policy.require(type(absent) is bool and (not absent or (limit == 0 and not capture)), "Absence read mode refused")
+    policy.require(type(optional_index_checksum) is bool and (not optional_index_checksum or
+                   (not absent and not capture and OPTIONAL_INDEX_CHECKSUMS.get(path) == limit)),
+                   "Optional index checksum mode refused")
     deadline = min(budget.deadline, time.monotonic() + READ_SECONDS)
     authorization = base64.b64encode((username + ":" + token).encode("ascii")).decode("ascii")
     host = HOST
@@ -91,7 +99,8 @@ def _read(path, credentials, limit, budget, *, capture=False, absent=False):
             if not absent and hop == 0 and response.status == 302:
                 target, host = _storage_target(response), STORAGE_HOST
                 continue  # Close the unused redirect body/connection before the unauthenticated GET.
-            policy.require(response.status == (404 if absent else 200), "Remote HTTP status refused")
+            missing = absent or (optional_index_checksum and hop == 0 and response.status == 404)
+            policy.require(response.status == (404 if missing else 200), "Remote HTTP status refused")
             headers = response.getheaders()
             for name in ("content-length", "content-encoding", "transfer-encoding", "age", "location"):
                 policy.require(sum(key.lower() == name for key, _ in headers) <= 1, "Ambiguous HTTP headers refused")
@@ -103,9 +112,9 @@ def _read(path, credentials, limit, budget, *, capture=False, absent=False):
             transfer = response.getheader("Transfer-Encoding")
             policy.require(transfer is None or (transfer.lower() == "chunked" and length is None),
                            "Ambiguous response framing refused")
-            if absent:
-                # This is only a path observation, after authenticated positive indexes and
-                # alongside the complete package API/window checks. Never consume an error body.
+            if missing:
+                # Only an origin path/checksum observation, never unused-version authority.
+                # Positive indexes and package API/window checks remain separate. Do not read an error body.
                 policy.require(length is None or (re.fullmatch(r"0|[1-9][0-9]{0,9}", length) is not None
                                and int(length) <= INDEX_LIMIT), "Absence response bound refused")
                 return None, None
@@ -368,7 +377,8 @@ def _index(body, artifact):
     policy.require(_scalar(root, "groupId") == policy.GROUP and _scalar(root, "artifactId") == artifact,
                    "Index coordinates differ")
     versioning = root.find("versioning")
-    _children(versioning, ("latest", "release", "versions", "lastUpdated"))
+    has_release = versioning.find("release") is not None
+    _children(versioning, ("latest", "versions", "lastUpdated") + (("release",) if has_release else ()))
     versions = versioning.find("versions")
     _children(versions, ("version",), repeated=True)
     values = []
@@ -378,8 +388,9 @@ def _index(body, artifact):
         values.append(child.text)
     policy.require(1 <= len(values) <= policy.MAX_ENTRIES and len(values) == len(set(values)),
                    "Index version list bound/duplicates refused")
-    latest, release = (_scalar(versioning, key) for key in ("latest", "release"))
-    policy.require(latest in values and release in values, "Index latest/release absent")
+    latest = _scalar(versioning, "latest")
+    release = _scalar(versioning, "release") if has_release else None
+    policy.require(latest in values and (release is None or release in values), "Index latest/release absent")
     updated = _scalar(versioning, "lastUpdated")
     policy.require(re.fullmatch(r"[0-9]{14}", updated) is not None, "Index timestamp refused")
     datetime.strptime(updated, "%Y%m%d%H%M%S")
@@ -393,7 +404,12 @@ def _read_index(artifact, credentials, budget):
     result = _index(body, artifact)
     for algorithm in policy.ALGORITHMS:
         expected = facts[algorithm].encode("ascii")
-        actual, _ = _read(path + "." + algorithm, credentials, len(expected), budget)
+        optional = algorithm in ("sha256", "sha512")
+        actual, _ = _read(path + "." + algorithm, credentials, len(expected), budget,
+                          optional_index_checksum=optional)
+        if actual is None:
+            policy.require(optional, "Required index checksum absent")
+            continue
         policy.require(actual["size"] == len(expected) and actual["sha256"] == policy.digest(expected),
                        "Index checksum bytes differ")
     return result
@@ -426,7 +442,8 @@ def _previous_indexes(previous, identities, version):
                        and all(type(v) is str and VERSION.fullmatch(v) is not None for v in values)
                        and len(values) == len(set(values)) and (version is None or version not in values),
                        "Prior version history refused")
-        policy.require(item["latest"] in values and item["release"] in values and type(item["last_updated"]) is str
+        policy.require(item["latest"] in values and (item["release"] is None or item["release"] in values)
+                       and type(item["last_updated"]) is str
                        and re.fullmatch(r"[0-9]{14}", item["last_updated"]) is not None
                        and type(item["size"]) is int and 0 < item["size"] <= INDEX_LIMIT
                        and policy.hex_value(item["sha256"]), "Prior index values refused")
@@ -473,7 +490,9 @@ def verify_remote(inventory, version, previous, completed, *, username, token, p
                 policy.require(current == prior_observed[identity], "Previously read-back index changed")
             if identity in completed:
                 policy.require(current["versions"] == previous[identity]["versions"] + [version]
-                               and current["latest"] == version and current["release"] == version
+                               and current["latest"] == version
+                               and (current["release"] == version or
+                                    (current["release"] is None and previous[identity]["release"] is None))
                                and current["last_updated"] >= previous[identity]["last_updated"],
                                "Native index lost/changed version history")
             else:
