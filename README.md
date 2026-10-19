@@ -53,8 +53,8 @@ the existing SDK's API37 metadata and `android.jar`, accepting real `android-37`
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
 publication components and Kotlin/API levels are unchanged. The committed
-`VERSION_NAME=0.2.1` is a **prospective engineering candidate, not a reserved or published
-version**; no tag or consumer pin changes with it. Historical `v0.2.0` must not be moved
+`VERSION_NAME=0.2.3` is a **prospective engineering candidate, not a reserved or published
+version**; no tag or consumer pin changes with it. Historical version tags must not be moved
 to admit changed helper bytes. CI's candidate/noncandidate distinction
 is described below.
 
@@ -199,7 +199,7 @@ internal presence API (never credential values); no internal/custom publisher is
 
 ## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed prospective version is `0.2.1`, not reserved or published.** PRs remain
+**The committed prospective version is `0.2.3`, not reserved or published.** PRs remain
 check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
 produced** and skip export, candidate artifact upload and attestation. Diagnostics are
 still retained. A green PR is not a producer receipt. An exact eligible integration push
@@ -672,7 +672,8 @@ facts and local lineage, comparing the original preflight. It intentionally uses
 aware source comparison **only alongside** this invocation's restore/verify and the original
 whole-output/model/graph/action checks, which repeat after HTTP immediately before the native action.
 It also rechecks the finite window, competing workflows/runs and all15 package version lists.
-First it observes all15 existing artifact indexes with all four checksums. Missing/ambiguous indexes
+First it observes all15 existing artifact indexes with mandatory MD5/SHA1 checksums and
+SHA256/SHA512 checksums when present. Missing/ambiguous indexes
 refuse; a new artifact without an existing index needs separately proved authority/handling.
 At later boundaries only newly successful writers' immutable payloads/sidecars are read once;
 all indexes remain fresh, previously verified indexes must be byte-identical, and pending indexes
@@ -684,7 +685,14 @@ Remote GETs use the fixed TLS host/path and at most one already-qualified creden
 registry-storage hop; no retry/304/content decoding, bounded time/bytes
 and content-free failures. Every payload and deterministic sidecar must match admitted size/SHA256.
 Mutable index XML is separately bounded/strict: retain prior version order, append the candidate
-once, check coordinates/latest/release/timestamp and all four hashes of **actual** index bytes.
+once, check coordinates/latest/timestamp and any present release=candidate. A genuinely absent
+release is recorded as None, never synthesized; an existing release cannot disappear. Only the
+exact mutable-index SHA256/SHA512 paths may be absent at the authenticated registry's first-hop404;
+storage-hop404, permission failures and malformed/mismatched checksums still refuse. Present
+checksums retain the same qualified storage hop and exact-byte verification. MD5/SHA1 are
+supplemental checks, not authentication; first-read trust remains fixed-host authenticated TLS
+and the independent registry/window admission. SHA256 computed over **actual** XML bytes binds
+pending/progress continuity; it is not an independent first-read attestation.
 It is not a sealed or expected timestamp/index. Partial/failing writers still fail final completion;
 once a native action started, the finalizer attempts bounded readback, never cleanup/overwrite/retry
 of remote state. Native Gradle itself can retry individual PUTs or warn on some checksum failures;
