@@ -53,7 +53,7 @@ the existing SDK's API37 metadata and `android.jar`, accepting real `android-37`
 `android-37.0` layouts. Conflicting SDK roots, missing prerequisites and wrong/preview APIs
 fail; CI does not install, rename or alias a platform to pass this check. Targets,
 publication components and Kotlin/API levels are unchanged. The committed
-`VERSION_NAME=0.2.4` is a **prospective engineering candidate, not a reserved or published
+`VERSION_NAME=0.2.5` is a **prospective engineering candidate, not a reserved or published
 version**; no tag or consumer pin changes with it. Historical version tags must not be moved
 to admit changed helper bytes. CI's candidate/noncandidate distinction
 is described below.
@@ -199,7 +199,7 @@ internal presence API (never credential values); no internal/custom publisher is
 
 ## Stage B: check-only PRs and prospective candidate provenance, not a publisher
 
-**The committed prospective version is `0.2.4`, not reserved or published.** PRs remain
+**The committed prospective version is `0.2.5`, not reserved or published.** PRs remain
 check-only: ordinary `check` coverage and the stdlib policy tests report **no candidate
 produced** and skip export, candidate artifact upload and attestation. Diagnostics are
 still retained. A green PR is not a producer receipt. An exact eligible integration push
@@ -612,8 +612,17 @@ and authenticated Maven observations must agree on an unused candidate. A Maven4
 is never absence authority. Backend preview or source tests do not establish real package
 consumer parity; those qualified inputs remain a separate operational requirement.
 
-The protected branch requires actual hosted Darwin/ARM64, existing Java21/Gradle9.6.1/offline admission,
-no build/configuration cache, no `--continue`, and the exact whole-cohort producer exclusions.
+The protected branch requires actual hosted Darwin/ARM64, existing Java21/Gradle9.6.1 admission,
+no build/configuration cache, no `--continue` or dependency refresh, and the exact whole-cohort producer exclusions.
+Only `promote-remote` requires an online Gradle invocation: Gradle's offline transport refuses native
+remote uploads. Export and owned-file promotion remain offline. Restore/verify task bodies remain
+local-only within the same remote invocation; splitting them would lose the required invocation-local state.
+Before subproject evaluation, remote mode registers a fail-closed `incoming.beforeResolve` on every
+named project configuration, including later-created configurations. This does not cover detached,
+settings or buildscript/plugin resolution and is not a network sandbox. Existing credential-free
+online scratch-tooling preparation, pinned plugins/source and exact graph/action/byte gates are unchanged.
+The existing small builtin-only Gradle API check exercises online mode and named-configuration refusal
+without publishing, dependency repositories or real credentials; actual remote execution remains a separate gate.
 Keep the already admitted archive plus `{ "selection": ..., "preflight": ..., "window": ... }` comparison in
 `$RUNNER_TEMP/kira-publisher-<publisher-run-id>-1/{kira-publication-bytes.tar,comparison.json}`:
 same-owner directory0700/files0600, no symlinks, outside the checkout. Supply the independently
@@ -702,7 +711,7 @@ pending/progress continuity; it is not an independent first-read attestation.
 It is not a sealed or expected timestamp/index. Partial/failing writers still fail final completion;
 once a native action started, the finalizer attempts bounded readback, never cleanup/overwrite/retry
 of remote state. Native Gradle itself can retry individual PUTs or warn on some checksum failures;
-its unchanged action is not atomic publication. Pinned native remote/offline behavior and the fixed
+its unchanged action is not atomic publication. Pinned native remote behavior and the fixed
 Darwin interpreter/process boundary still require actual hosted qualification.
 
 The caller captures bounded credential-redacted native logs, stops only its owned Gradle

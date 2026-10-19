@@ -254,7 +254,7 @@ def guarded_command(runtime, selected, metadata, record_sha256):
     policy.require(producers == sorted(set(producers)) and bool(producers) and policy.hex_value(record_sha256),
                    "Exact admitted producer command required")
     # Construction is not native execution or authority. No credential is ever an argument.
-    return [str(runtime.producer / "gradlew"), "--offline", "--no-daemon", "--no-parallel", "--max-workers=1",
+    return [str(runtime.producer / "gradlew"), "--no-daemon", "--no-parallel", "--max-workers=1",
             "--no-build-cache", "--no-configuration-cache", "--console=plain", "-PkiraPublicationMode=promote-remote",
             "-PkiraPublicationSealSha256=" + selected["producer"]["seal_sha256"],
             "-PkiraPublisherRecordSha256=" + record_sha256, ":promoteKiraPublicationBytes"] + [part for task in producers for part in ("-x", task)]

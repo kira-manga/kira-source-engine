@@ -209,7 +209,8 @@ if (byteMode == null) {
     val remoteMode = byteMode == "promote-remote"
     requireBytes(gradle.gradleVersion == "9.6.1", "TOOLCHAIN", "The local byte binding requires Gradle9.6.1.")
     requireBytes(JavaVersion.current() == JavaVersion.VERSION_21, "TOOLCHAIN", "The local byte binding requires Java21.")
-    requireBytes(gradle.startParameter.isOffline, "OFFLINE", "Owned-file byte work requires offline mode; do not fetch missing prerequisites.")
+    requireBytes(gradle.startParameter.isOffline != remoteMode, "OFFLINE",
+        "Native remote upload requires online mode; owned-file export/promotion requires offline mode.")
     @Suppress("DEPRECATION")
     val configurationCacheRequested = gradle.startParameter.isConfigurationCacheRequested
     requireBytes(!configurationCacheRequested, "CACHE", "The invocation-local gate does not support configuration cache.")
@@ -217,9 +218,18 @@ if (byteMode == null) {
         requireBytes(System.getProperty("os.name") == "Mac OS X" && System.getProperty("os.arch") == "aarch64" &&
             System.getenv("GITHUB_ACTIONS") == "true" && System.getenv("RUNNER_OS") == "macOS" && System.getenv("RUNNER_ARCH") == "ARM64",
             "REMOTE_HOST", "Held remote byte work requires the actual hosted Darwin/ARM64 producer-compatible host.")
-        requireBytes(!gradle.startParameter.isContinueOnFailure && !gradle.startParameter.isBuildCacheEnabled &&
+        requireBytes(!gradle.startParameter.isRefreshDependencies && !gradle.startParameter.isContinueOnFailure && !gradle.startParameter.isBuildCacheEnabled &&
             gradle.startParameter.logLevel !in setOf(LogLevel.DEBUG, LogLevel.INFO),
-            "REMOTE_FLAGS", "No continue, build cache or verbose credential-bearing native transport logging.")
+            "REMOTE_FLAGS", "No dependency refresh, continue, build cache or verbose credential-bearing native transport logging.")
+        // Install before subproject evaluation, including configurations created later.
+        // This covers named project configurations, not settings/buildscript/detached resolution.
+        allprojects {
+            configurations.configureEach {
+                incoming.beforeResolve {
+                    throw GradleException("KIRA_PUBLICATION_BYTES_DEPENDENCIES: Product dependency resolution is forbidden during native promotion.")
+                }
+            }
+        }
     }
 
     val ownedRoot = rootProject.projectDir.toPath().toRealPath()
@@ -1224,9 +1234,10 @@ if (byteMode == null) {
             requireBytes(selected.isNotEmpty() && selectedTasks.all { it in allowed } && restoreTask.get() in selectedTasks &&
                 verifyTask.get() in selectedTasks && readbackTask.get() in selectedTasks && selected.all { it in writers },
                 "GRAPH", "Promotion permits only restore, fresh verification, modeled native writers and readback; no producer/generator/check may run.")
-            requireBytes(!remoteMode || (selected.toSet() == writers.toSet() && !gradle.startParameter.isContinueOnFailure &&
+            requireBytes(!remoteMode || (selected.toSet() == writers.toSet() && !gradle.startParameter.isOffline &&
+                !gradle.startParameter.isRefreshDependencies && !gradle.startParameter.isContinueOnFailure &&
                 !gradle.startParameter.isBuildCacheEnabled && gradle.startParameter.logLevel !in setOf(LogLevel.DEBUG, LogLevel.INFO)),
-                "REMOTE_GRAPH", "Remote attachment requires all fifteen native writers, no resume/partial graph/cache or verbose transport logging.")
+                "REMOTE_GRAPH", "Remote attachment requires all fifteen online native writers, no dependency refresh/resume/partial graph/cache or verbose transport logging.")
             selected
         }
 

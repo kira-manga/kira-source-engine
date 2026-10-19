@@ -221,8 +221,10 @@ class PublisherWorkflowTests(fixtures.OwnedFixture):
                                              package_token=self.package_token, audit_token=self.audit_token),
                              {"result": "complete-native-remote-readback"})
         command = run.call_args.args[2]
-        self.assertEqual(command[:8], [str(self.checkout / "gradlew"), "--offline", "--no-daemon", "--no-parallel",
+        self.assertEqual(command[:7], [str(self.checkout / "gradlew"), "--no-daemon", "--no-parallel",
                                       "--max-workers=1", "--no-build-cache", "--no-configuration-cache", "--console=plain"])
+        self.assertNotIn("--offline", command)
+        self.assertNotIn("--refresh-dependencies", command)
         self.assertIn("-PkiraPublicationSealSha256=" + self.selection["producer"]["seal_sha256"], command)
         self.assertIn("-PkiraPublisherRecordSha256=" + record_hash, command)
         self.assertNotIn("--info", command)
@@ -616,6 +618,25 @@ class MetadataAuditCustodyTests(unittest.TestCase):
 
 
 class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
+    def test_remote_online_mode_refuses_named_dependency_resolution_without_changing_local_modes(self):
+        root = Path(__file__).resolve().parents[2]
+        gate = (root / "gradle/publication-gates.gradle.kts").read_text()
+        self.assertIn('requireBytes(gradle.startParameter.isOffline != remoteMode, "OFFLINE"', gate)
+        remote = gate.split("    if (remoteMode) {", 1)[1].split("    val ownedRoot", 1)[0]
+        self.assertIn("!gradle.startParameter.isRefreshDependencies", remote)
+        self.assertIn("allprojects {\n            configurations.configureEach {\n                incoming.beforeResolve {", remote)
+        self.assertIn("KIRA_PUBLICATION_BYTES_DEPENDENCIES", remote)
+        self.assertNotIn("canBeResolved", remote)
+        self.assertLess(gate.index("incoming.beforeResolve"), gate.index("gradle.projectsEvaluated"))
+        graph = gate.split("        auditPromotionGraph = {", 1)[1].split("        gradle.taskGraph.whenReady", 1)[0]
+        self.assertIn("!gradle.startParameter.isOffline", graph)
+        self.assertIn("!gradle.startParameter.isRefreshDependencies", graph)
+        owned = (root / ".github/scripts/owned_file_promotion.py").read_text()
+        self.assertIn('return [str(job.producer / "gradlew"), "--offline", *FLAGS, "-PkiraPublicationMode=promote"', owned)
+        ci = (root / ".github/workflows/ci.yml").read_text()
+        export = ci.split("      - name: Export existing candidate production bytes offline", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("./gradlew --offline", export)
+
     def test_cli_strips_child_credentials_and_refuses_unconfigured_or_write_custody(self):
         workspace, temporary = self.root / "workspace", self.root / "runner-temp"
         workspace.mkdir()
@@ -759,7 +780,7 @@ class PublisherWorkflowEntryTests(fixtures.OwnedFixture):
         ci = (Path(__file__).resolve().parents[1] / "workflows/ci.yml").read_text()
         self.assertIn("      - main", ci.split("  push:", 1)[0])
         self.assertNotIn("      - main", ci.split("  push:", 1)[1].split("permissions:", 1)[0])
-        ipc_step = ci.split("      - name: Test controller metadata custody on the actual Darwin host", 1)[1].split("      - name:", 1)[0]
+        ipc_step = ci.split("      - name: Test controller metadata custody and native CLI on the actual Darwin host", 1)[1].split("      - name:", 1)[0]
         self.assertIn("timeout-minutes: 2", ipc_step)
         self.assertIn("python3 -B -m unittest -v", ipc_step)
         self.assertIn("test_publisher_workflow.MetadataAuditCustodyTests", ipc_step)
