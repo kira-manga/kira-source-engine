@@ -1,0 +1,172 @@
+import groovy.json.JsonOutput
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.security.MessageDigest
+import org.gradle.api.GradleException
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.tasks.testing.Test
+
+// Check-only JVM consumer. The Engine orchestrator admits the original inventory
+// and actual owned-Maven bytes. Never substitute versions, dependencies or locks.
+def group = 'me.manga.kira.source'
+def version = '0.2.0'
+def require = { condition, message ->
+    if (!condition) throw new GradleException('Source cohort refused: ' + message)
+}
+def emit = { event, value -> logger.lifecycle('KIRA_SOURCE_COHORT_' + event + ' ' + JsonOutput.toJson(value)) }
+def sha = { File file ->
+    file.withInputStream { stream ->
+        def digest = MessageDigest.getInstance('SHA-256')
+        byte[] buffer = new byte[65536]
+        int count
+        while ((count = stream.read(buffer)) != -1) digest.update(buffer, 0, count)
+        digest.digest().encodeHex().toString()
+    }
+}
+def input = { name ->
+    def raw = System.getenv(name)
+    require(raw && new File(raw).isAbsolute(), 'Missing absolute input: ' + name)
+    def path = new File(raw).toPath()
+    require(path == path.normalize() && path == path.toRealPath(), 'Noncanonical input: ' + name)
+    path
+}
+def repository = input('KIRA_SOURCE_COHORT_REPOSITORY')
+def inventory = input('KIRA_SOURCE_COHORT_INVENTORY').toFile()
+def inventorySha = System.getenv('KIRA_SOURCE_COHORT_INVENTORY_SHA256')
+require(Files.isDirectory(repository, LinkOption.NOFOLLOW_LINKS), 'Owned repository absent')
+require(inventorySha ==~ /[0-9a-f]{64}/ && inventory.isFile() && inventory.length() >= 1L && inventory.length() <= 2L * 1024 * 1024 &&
+    sha(inventory) == inventorySha, 'Original selected inventory required')
+def lines = inventory.readLines('UTF-8')
+require(lines.size() in 1..1024, 'Inventory entry bound')
+long total = 0
+def rows = lines.collect { line ->
+    def cells = line.split('\t', -1)
+    require(cells.size() == 9 && cells[0] in [':source-contract', ':source-engine', ':source-testkit'] &&
+        cells[2] == group && cells[4] == version, 'Inventory coordinate/version')
+    require(cells[3] ==~ /source-(contract|engine|testkit)(-(jvm|android|iosarm64|iossimulatorarm64))?/,
+        'Inventory module')
+    require(cells[7] ==~ /[1-9][0-9]{0,8}/ && cells[8] ==~ /[0-9a-f]{64}/, 'Inventory facts')
+    def prefix = group.replace('.', '/') + '/' + cells[3] + '/' + version + '/'
+    require(cells[6].startsWith(prefix) && !cells[6].substring(prefix.length()).contains('/') &&
+        !cells[6].contains('\\'), 'Inventory Maven path')
+    def path = repository.resolve(cells[6])
+    require(path == path.normalize() && path.startsWith(repository) && path == path.toRealPath() &&
+        Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS), 'Redirected inventory file')
+    long size = cells[7].toLong()
+    total += size
+    require(total <= 256 * 1024 * 1024 && size <= 64 * 1024 * 1024 && Files.size(path) == size &&
+        sha(path.toFile()) == cells[8], 'Owned bytes differ from inventory')
+    [project: cells[0], publication: cells[1], module: cells[3], kind: cells[5], path: cells[6], size: size, sha256: cells[8]]
+}
+require(rows.collect { it.path }.toSet().size() == rows.size(), 'Duplicate inventory entry')
+def wanted = rows.findAll {
+    it.project in [':source-contract', ':source-engine'] && it.publication == 'jvm' && it.kind == 'artifact'
+}
+require(wanted.size() == 2 && wanted.collect { it.project }.toSet().size() == 2, 'Two selected JVM binaries required')
+def prefix = 'me.manga.kira.backend.sourceconfig.'
+def originalSelectors = [
+    'parsing.ManhwatopPublishedEngineTest', 'parsing.AuthoredSourceConfigTest', 'parsing.SourceConfigParserTest',
+    'validation.SourceConfigValidatorTest', 'admin.FullBundledParityIT', 'admin.SourcePreviewIT',
+    'validation.SourceConfigValidatorReaderCapabilityTest.finite feeds survive canonical authoring and reject unsupported verbs',
+].collect { prefix + it }.toSet()
+def reconciliationSelectors = [
+    'admin.SourceCatalogReconciliationIT', 'api.GenericV2CutoverControllerTest',
+    'FlywayMigrationIT', 'FlywayIncrementalOrderIT', 'admin.BootstrapPublicationGuardIT',
+    'admin.BootstrapReplayIT', 'admin.BootstrapEndpointIT', 'admin.BootstrapLateRollbackIT',
+].collect { prefix + it }.toSet()
+def menus = [originalSelectors, reconciliationSelectors]
+def arguments = gradle.startParameter.taskNames
+require(arguments && arguments[0] == 'test' && menus.any { arguments.size() == 1 + 2 * it.size() },
+    'One exact Backend test batch required')
+def actual = []
+for (int index = 1; index < arguments.size(); index += 2) {
+    require(arguments[index] == '--tests', 'Only explicit task-scoped test filters are admitted')
+    actual.add(arguments[index + 1])
+}
+require(actual.size() == actual.toSet().size() && menus.any { actual.toSet() == it }, 'Backend selected tests changed')
+def selectors = actual.toSet()
+require(gradle.startParameter.excludedTaskNames.toSet() == ['jacocoTestReport'].toSet(), 'Only existing Jacoco exclusion is admitted')
+require(!gradle.startParameter.writeDependencyLocks && gradle.startParameter.lockedDependenciesToUpdate.isEmpty(), 'Lock writing is forbidden')
+require(gradle.startParameter.dependencyVerificationMode.name() == 'STRICT' &&
+    !gradle.startParameter.configurationCacheRequested, 'Strict verification and configuration-cache off required')
+
+gradle.beforeProject { project ->
+    require(project.path == ':' && project.providers.gradleProperty('kiraUseMavenLocal').orNull != 'true',
+        'Only the actual single-module Backend, without MavenLocal')
+    def repositories = project.repositories
+    repositories.exclusiveContent {
+        forRepository {
+            repositories.maven {
+                name = 'KiraSourceCohort'
+                url = repository.toUri()
+                metadataSources { gradleMetadata(); mavenPom() }
+            }
+        }
+        filter { includeGroup(group) }
+    }
+    project.configurations.configureEach { configuration ->
+        configuration.resolutionStrategy.eachDependency { dependency ->
+            if (dependency.requested.group == group) require(dependency.requested.version == version, 'Mixed requested source version')
+        }
+    }
+}
+def attrs = { attributes -> attributes.keySet().sort { it.name }.collectEntries {
+    [(it.name): attributes.getAttribute(it).toString()]
+} }
+def observed = new LinkedHashSet()
+def witness = { task, configuration, inputFiles ->
+    require(sha(inventory) == inventorySha && configuration.canBeResolved, 'Changed inventory/unresolvable actual configuration')
+    def artifacts = configuration.incoming.artifactView {
+        componentFilter { id -> id instanceof ModuleComponentIdentifier && id.group == group }
+        lenient = false
+    }.artifacts.artifacts
+    require(artifacts.size() == 2, 'Missing/extra actual source binaries')
+    def inputs = inputFiles.collect { it.canonicalFile }.toSet()
+    def selected = wanted.collect { row ->
+        def matches = artifacts.findAll { artifact ->
+            def id = artifact.id.componentIdentifier
+            id.version == version && id.module in [row.module, row.project.substring(1)] &&
+                artifact.file.length() == row.size && sha(artifact.file) == row.sha256
+        }
+        require(matches.size() == 1, 'Resolved binary differs from selected JVM cohort')
+        def artifact = matches[0]
+        require(attrs(artifact.variant.attributes)['org.jetbrains.kotlin.platform.type'] == 'jvm', 'Non-JVM source variant')
+        def used = inputs.findAll { it.isFile() && it.length() == row.size && sha(it) == row.sha256 }
+        require(used.size() == 1, 'Compiler/Test does not use the exact selected bytes')
+        [component: artifact.id.componentIdentifier.displayName, attributes: attrs(artifact.variant.attributes),
+         mavenPath: row.path, resolvedPath: artifact.file.canonicalPath, inputPath: used[0].path, size: row.size, sha256: row.sha256]
+    }
+    def components = configuration.incoming.resolutionResult.allComponents.collect { it.id }
+        .findAll { it instanceof ModuleComponentIdentifier }
+    require(components.findAll { it.group == group }.every { it.version == version }, 'Mixed resolved source version')
+    emit('WITNESS', [task: task.path, configuration: configuration.name, attributes: attrs(configuration.attributes), artifacts: selected,
+        selectedSupportComponents: components.findAll { it.group in ['com.fleeksoft.ksoup', 'org.jetbrains.kotlin', 'org.jetbrains.kotlinx'] }
+            .collect { it.displayName }.sort()])
+    observed.add(task.path)
+}
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    def declared = project.configurations.getByName('implementation').dependencies.findAll { it.group == group }
+    require(declared.size() == 1 && declared[0].name == 'source-engine' && declared[0].version == version,
+        'Actual Backend must declare source-engine:0.2.0 without testkit')
+    def compile = project.tasks.getByName('compileKotlin')
+    compile.doFirst { witness(compile, project.configurations.getByName('compileClasspath'), compile.libraries.files) }
+    def test = project.tasks.getByName('test')
+    require(test instanceof Test && test.maxParallelForks == 1, 'One actual JVM Test worker required')
+    def temporary = System.getenv('TMPDIR')
+    require(temporary && new File(temporary).isAbsolute() && new File(temporary).isDirectory(), 'Owned test temporary directory required')
+    test.systemProperty('java.io.tmpdir', temporary)
+    test.doFirst { witness(test, project.configurations.getByName('testRuntimeClasspath'), test.classpath.files) }
+    emit('INPUT', [version: version, inventorySha256: inventorySha, selectors: selectors.toList().sort()])
+}
+gradle.taskGraph.whenReady { graph ->
+    require(graph.hasTask(':compileKotlin') && graph.hasTask(':test') &&
+        graph.allTasks.findAll { it instanceof Test }.collect { it.path } == [':test'], 'Unexpected actual compile/Test graph')
+    emit('GRAPH', [tasks: graph.allTasks.collect { it.path }])
+}
+gradle.buildFinished { result ->
+    if (result.failure == null) {
+        require(observed == [':compileKotlin', ':test'].toSet(), 'Fresh compiler/Test witnesses did not both execute')
+        emit('COMPLETE', [version: version, inventorySha256: inventorySha, witnessedTasks: observed.toList().sort()])
+    }
+}

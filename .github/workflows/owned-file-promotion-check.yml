@@ -1,0 +1,156 @@
+name: Current cohort owned-file promotion check (no remote publication)
+
+# A new control-only issue-branch push runs this once without another producer or
+# merging a workflow to default just to register workflow_dispatch. Source stays
+# selected below; the completed cohort is independently bound before promotion.
+on:
+  push:
+    branches: [remediation/priority-sources-20261017]
+    paths:
+      - .github/workflows/owned-file-promotion-check.yml
+      - .github/scripts/owned_file_promotion.py
+      - .github/scripts/publication_policy.py
+  workflow_dispatch:
+    inputs:
+      selection:
+        description: Exact independently selected completed producer tuple (optional; committed selection is the default)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+concurrency:
+  group: kira-current-cohort-owned-file-promotion
+  cancel-in-progress: false
+
+env:
+  # Primary independently checked the complete run, archive, seal and immutable
+  # artifact receipt. Genuine native signature intake happens in this job, not here.
+  SELECTED_PRODUCER: >-
+    {"archive_sha256":"9a81ab0ed2befed10ea7c716fdd03d5d8346b74c171fd49df9b7128abff3439b","artifact_id":12107171679,"attestation_job_id":117446096346,"inventory_sha256":"628cd0381c9ca9f738cc589f42629d812408f54742da4099af134bbb3f59becf","producer_job_id":117442236053,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39048582890,"seal_sha256":"4355de0cd6691c6d0fce0ac15c991bab58ad93a0df092eb4a5ecc9e4b9e896e1","source_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","source_tree":"9f9869fa47de0a82e001be5de04bbb9d61c662ad","transport_sha256":"8b4e882930deb520a8fecdf85a3793974d735d8a2e1b1b235195806c6db9065e","version":"0.2.0","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"901bae34291f5baf8dcf104223b27d1d5cd1d15e","workflow_sha256":"ca05d0e76818a5788cf83c0666ddd0efcf22c6b09653867e7d0d976883c1f0df"}
+
+jobs:
+  owned-file:
+    if: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_owner == 'kira-manga' &&
+          github.repository_id == '1310736214' && github.run_attempt == 1 &&
+          github.ref == 'refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_ref == 'kira-manga/kira-source-engine/.github/workflows/owned-file-promotion-check.yml@refs/heads/remediation/priority-sources-20261017' &&
+          github.workflow_sha == github.sha }}
+    runs-on: macos-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Check out the separately reviewed control, never overlay producer source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Admit the real selected tuple and fresh job-owned locations
+        id: runtime
+        env:
+          KIRA_PRODUCER_SELECTION: ${{ inputs.selection || env.SELECTED_PRODUCER }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py prepare
+
+      - name: Check out only the exact completed producer, without generated roots
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: producer
+          persist-credentials: false
+
+      - name: Download only the immutable selected original artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.producer_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+
+      - name: Acquire the fixed public Darwin verifier, never a PATH binary
+        timeout-minutes: 2
+        env:
+          OWNED_ROOT: ${{ steps.runtime.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          asset="$OWNED_ROOT/gh_2.100.0_macOS_arm64.zip"
+          [[ ! -e "$asset" && ! -L "$asset" ]]
+          /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 2 \
+            --noproxy '*' --proxy '' --proto '=https' --proto-redir '=https' \
+            --max-time 60 --max-filesize 67108864 --output "$asset" \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_macOS_arm64.zip
+
+      - name: Genuine native signatures and fresh official completed receipts before generated source
+        timeout-minutes: 6
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+          KIRA_INTAKE_READ_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py intake
+
+      - name: Set up the supported Java21 selector, then require the exact sealed runtime
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Require exact sealed Java/vendor/OS/architecture and existing SDK37
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py toolchain
+
+      - name: Check out separate disposable same-source tooling scratch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Prepare authenticated owned libffi/compiler without changing GitHub context
+        timeout-minutes: 15
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py bootstrap
+
+      - name: Prepare only tooling with scratch help, immediately stop and discard scratch histories
+        timeout-minutes: 7
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py warmup
+
+      - name: Fresh raw restore and all15 original offline native file writers, then complete readback
+        timeout-minutes: 7
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py promote
+
+      - name: Always stop only owned Gradle and retain bootstrap provenance before disposal
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 4
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py finalize
+
+      - name: Retain actual promoted Maven bytes, intake, native logs, hashes and cleanup evidence
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-owned-file-promotion-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/diagnostics/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
+
+      - name: Always dispose only this job's reserved source, scratch and owned runtime after capture
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 2
+        run: /usr/bin/python3 -B -E -s .github/scripts/owned_file_promotion.py dispose

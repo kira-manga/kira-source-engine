@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import types
+import zipfile
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
@@ -51,12 +53,25 @@ MAX_ENTRIES = 4096
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 TASK = r"(?::[A-Za-z0-9_.-]+)+"
 
+# The independently qualified Kotlin 2.2.21 source bootstrap, not an allowance
+# for arbitrary native.home/GRADLE_OPTS or a disputed prebuilt checksum waiver.
+BOOTSTRAP_FILES = {
+    "release/libffi-source.json": "701ab49c3a754e2091b14d52689746593e2186f7e7f9fa3d87b53927fd1a2a79",
+    "scripts/release/prepare-libffi-source.py": "644e5b089610ab56e1dd0cc7ec41e69c874f5fee07caa39789b75172ab597e12",
+    "scripts/release/libffi-cfi-startproc.patch": "327912eda89bf7820cc34f679cedc76894a4a01246cec6e0ab1382161287cbee",
+    "scripts/release/libffi-source-smoke.c": "e57e6afa455ec5fc1b82424182d6ace58ca6a78418c9b32400d428cefe533e1a",
+    "scripts/release/tests/libffi-source-test.py": "7c33c0d2fc46eb2230ab98404d07376521249d62c86921b6d518b19f1513b7d2",
+}
+
 # Official cli/cli v2.100.0 release API digest; no binary acquisition by this tool.
 # Source 45437bc7eeeb3359bbfddd1742f79de7652fd3e2 uses sigstore-go v1.3.0
 # (22d3691c7b8e0c5530fae3c05577690bfef5cd00). Certificate Extensions are FLAT JSON.
 GH_ASSET = "gh_2.100.0_linux_amd64.tar.gz"
 GH_ASSET_SHA256 = "e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be"
 GH_MEMBER = "gh_2.100.0_linux_amd64/bin/gh"
+GH_DARWIN_ASSET = "gh_2.100.0_macOS_arm64.zip"
+GH_DARWIN_ASSET_SHA256 = "45f9a62da2f6e641a7fad57e2ce39656dfd7ef331372d80a2a2aed65abb01642"
+GH_DARWIN_MEMBER = "gh_2.100.0_macOS_arm64/bin/gh"
 
 
 class Refusal(ValueError):
@@ -174,6 +189,82 @@ def check_environment(env):
         require(not any((Path(home) / p).exists() for p in
                         ("gradle.properties", "init.gradle", "init.gradle.kts", "init.d")),
                 "Unreviewed Gradle user properties/init input refused")
+
+
+def committed_bootstrap(root, env, source):
+    """Load only the pinned committed helper in an exact private producer runtime."""
+    require(env.get("GITHUB_REPOSITORY") == REPOSITORY and
+            env.get("GITHUB_ACTIONS") == "true" and env.get("RUNNER_OS") == "macOS" and
+            env.get("RUNNER_ARCH") == "ARM64" and platform.system() == "Darwin" and
+            platform.machine() == "arm64", "Actual hosted Darwin ARM64 producer required")
+    run_id, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[1-9][0-9]*", run_id) and re.fullmatch(r"[1-9][0-9]*", attempt) and
+            source["source_sha"] == env.get("GITHUB_SHA"), "Bootstrap run/source identity mismatch")
+    temp = Path(env.get("RUNNER_TEMP", ""))
+    require(temp.is_absolute(), "Absolute runner temporary directory required")
+    temp = temp.resolve(strict=True)
+    require(temp.is_dir() and temp != Path("/") and re.fullmatch(r"/[A-Za-z0-9._/-]+", str(temp)),
+            "Unsafe runner temporary directory")
+    runtime = temp / f"kira-ci-{run_id}-{attempt}"
+    require(env.get("KIRA_CI_ROOT") == str(runtime) and
+            env.get("GRADLE_USER_HOME") == str(runtime / "gradle"), "Exact owned CI/Gradle roots required")
+    for path in (runtime, runtime / "gradle"):
+        require(not any(p.is_symlink() for p in (path, *path.parents)) and path.is_dir() and
+                path.stat().st_uid == os.getuid() and path.stat().st_mode & 0o077 == 0,
+                "Private producer runtime ownership/permissions mismatch")
+    owner = {"repository": REPOSITORY, "run_id": run_id, "run_attempt": attempt,
+             "source_sha": source["source_sha"], "root": str(runtime)}
+    require(json_data(read_small(runtime / "owner.json")) == owner, "Producer owner marker mismatch")
+    scripts = {}
+    for name, sha256 in BOOTSTRAP_FILES.items():
+        data = read_small(Path(root) / name)
+        require(source["files"].get(name, {}).get("sha256") == sha256 and
+                digest(data) == sha256, "Committed bootstrap review drift")
+        scripts[name] = data
+    path = Path(root) / "scripts/release/prepare-libffi-source.py"
+    helper = types.ModuleType("kira_committed_libffi_bootstrap")
+    helper.__file__ = str(path)
+    # Execute the bytes just measured, never a timestamp-valid ambient .pyc.
+    exec(compile(scripts["scripts/release/prepare-libffi-source.py"], str(path), "exec"), helper.__dict__)
+    return helper
+
+
+def bootstrap_preflight(root, env):
+    """Strict, fresh admission before prepare; no native code or downloads here."""
+    source = ci_state(root, env, fresh=True)
+    helper = committed_bootstrap(root, env, source)
+    try:
+        helper.override_guard(Path(root), env)
+        owned = helper.owned_root(env)
+        require(not helper.present(owned) and not helper.present(owned.parent / helper.PROVENANCE),
+                "Prior bootstrap/provenance cannot be reused")
+    except helper.BootstrapError as error:
+        raise Refusal("Unprepared bootstrap environment refused") from error
+
+
+def bootstrap_profile(root, env, source):
+    """Producer-only exception: exact derived options AND a live verified profile.
+
+    The general environment guard and Linux attestation/intake remain unchanged.
+    Only the helper's counter is omitted from before/after equality; all stable
+    provenance, installed-file/configuration hashes and owner facts remain bound.
+    """
+    check_environment({key: value for key, value in env.items() if key != "GRADLE_OPTS"})
+    helper = committed_bootstrap(root, env, source)
+    owned = helper.owned_root(env)
+    home = owned / "compiler" / "kotlin-native-prebuilt-macos-aarch64-2.2.21"
+    require(env.get("GRADLE_OPTS") == helper.NATIVE_HOME + str(home) + " " + helper.CACHE_OFF and
+            env.get("KONAN_DATA_DIR") == str(owned / "data"), "Exact derived private native options required")
+    try:
+        # Existing verify checks pins, owner, profile-only compiler edit, installed
+        # library hashes, blacklist, absent intermediates and no prebuilt receipts.
+        # It performs no downloads, Gradle invocation or native code execution.
+        helper.verify(env, Path(root))
+    except helper.BootstrapError as error:
+        raise Refusal("Source-built private native profile verification refused") from error
+    state = json_data(read_small(owned / helper.STATE))
+    require(positive(state.pop("verification_count")), "Missing live bootstrap verification")
+    return {"reviewed_files": dict(BOOTSTRAP_FILES), "profile": state}
 
 
 def git(root, *args):
@@ -320,8 +411,9 @@ def source_snapshot(root, sha, fresh=False):
             "workflow_sha256": files[WORKFLOW]["sha256"], "files": files}
 
 
-def ci_state(root, env, fresh=False):
-    check_environment(env)
+def ci_state(root, env, fresh=False, *, bootstrap=False):
+    if not bootstrap:
+        check_environment(env)
     source = source_snapshot(root, env.get("GITHUB_SHA", ""), fresh)
     version = committed_version(read_small(Path(root) / "gradle.properties"))
     eligible = candidate_eligible(env, version, source["source_sha"])
@@ -331,10 +423,13 @@ def ci_state(root, env, fresh=False):
     run_id, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
     require(re.fullmatch(r"[1-9][0-9]*", run_id) and re.fullmatch(r"[1-9][0-9]*", attempt),
             "Run/attempt identity missing")
-    return {**source, "version": version, "candidate": eligible, "run_id": int(run_id),
-            "run_attempt": int(attempt), "repository": env.get("GITHUB_REPOSITORY"),
-            "ref": env.get("GITHUB_REF"), "workflow_ref": env.get("GITHUB_WORKFLOW_REF"),
-            "workflow_sha": env.get("GITHUB_WORKFLOW_SHA")}
+    state = {**source, "version": version, "candidate": eligible, "run_id": int(run_id),
+             "run_attempt": int(attempt), "repository": env.get("GITHUB_REPOSITORY"),
+             "ref": env.get("GITHUB_REF"), "workflow_ref": env.get("GITHUB_WORKFLOW_REF"),
+             "workflow_sha": env.get("GITHUB_WORKFLOW_SHA")}
+    if bootstrap:
+        state["native_bootstrap"] = bootstrap_profile(root, env, source)
+    return state
 
 
 def existing_sdk37(env):
@@ -635,17 +730,40 @@ def _verified_policy(document, expected):
             all(s.get("digest") == wanted[s["name"]] for s in subjects), "Verified subject/digest mismatch")
 
 
+def _darwin_verifier_bytes(asset_bytes):
+    """Read only the fixed regular executable from already hash-admitted ZIP bytes."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(asset_bytes)) as package:
+            members = package.infolist()
+            require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
+            matches = [member for member in members if member.filename == GH_DARWIN_MEMBER]
+            require(len(matches) == 1, "Pinned native executable missing/invalid")
+            member = matches[0]
+            require(member.create_system == 3 and stat.S_ISREG(member.external_attr >> 16)
+                    and not member.is_dir() and not member.flag_bits & 1
+                    and member.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                    and 0 < member.file_size <= MAX_META * 8, "Pinned native executable missing/invalid")
+            with package.open(member) as stream:
+                data = stream.read(MAX_META * 8 + 1)
+            require(len(data) == member.file_size, "Pinned native executable length mismatch")
+            return data
+    except Exception:
+        raise Refusal("Pinned native ZIP refused") from None
+
+
 def native_verify(gh_asset, bundle, subjects, expected):
     """No PATH gh, download, token or guessed schema fallback. Caller separately admits this asset.
 
     Signature/certificate verification runs BEFORE interpreting native JSON. Public trust-root
     refresh by gh may require network; this is not advertised as network-isolated verification.
     """
-    require(platform.system() == "Linux" and platform.machine() == "x86_64", "Pinned verifier host mismatch")
+    host = (platform.system(), platform.machine())
+    pins = {("Linux", "x86_64"): GH_ASSET_SHA256, ("Darwin", "arm64"): GH_DARWIN_ASSET_SHA256}
+    require(host in pins, "Pinned verifier host mismatch")
     asset = regular(gh_asset)
     with asset.open("rb") as stream:
         asset_bytes = stream.read(MAX_META * 8 + 1)
-    require(len(asset_bytes) <= MAX_META * 8 and digest(asset_bytes) == GH_ASSET_SHA256,
+    require(len(asset_bytes) <= MAX_META * 8 and digest(asset_bytes) == pins[host],
             "Official native verifier asset pin mismatch")
     bundle = regular(bundle)
     require(bundle.suffix in (".json", ".jsonl"), "Native bundle must be JSON/JSONL")
@@ -653,18 +771,23 @@ def native_verify(gh_asset, bundle, subjects, expected):
     with tempfile.TemporaryDirectory(prefix="kira-native-verifier-") as temp:
         temp = Path(temp)
         # Read the SAME pinned immutable bytes, not a second open of a replaceable path.
-        with tarfile.open(fileobj=io.BytesIO(asset_bytes), mode="r:gz") as package:
-            members = package.getmembers()
-            require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
-            matches = [m for m in members if m.name == GH_MEMBER]
-            require(len(matches) == 1 and matches[0].isreg() and 0 < matches[0].size <= MAX_META * 8,
-                    "Pinned native executable missing/invalid")
-            binary = temp / "gh"
-            write_new(binary, package.extractfile(matches[0]).read(MAX_META * 8 + 1))
+        binary = temp / "gh"
+        if host == ("Linux", "x86_64"):
+            with tarfile.open(fileobj=io.BytesIO(asset_bytes), mode="r:gz") as package:
+                members = package.getmembers()
+                require(len(members) <= MAX_ENTRIES, "Native distribution entry bound")
+                matches = [m for m in members if m.name == GH_MEMBER]
+                require(len(matches) == 1 and matches[0].isreg() and 0 < matches[0].size <= MAX_META * 8,
+                        "Pinned native executable missing/invalid")
+                write_new(binary, package.extractfile(matches[0]).read(MAX_META * 8 + 1))
+        else:
+            write_new(binary, _darwin_verifier_bytes(asset_bytes))
         binary.chmod(0o700)
         local_bundle = temp / ("bundle" + bundle.suffix)
         write_new(local_bundle, data)
-        env = {"PATH": os.defpath, "HOME": str(temp), "XDG_CONFIG_HOME": str(temp),
+        config = temp / "config"
+        config.mkdir(mode=0o700)
+        env = {"PATH": os.defpath, "HOME": str(temp), "XDG_CONFIG_HOME": str(config),
                "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
         for subject in subjects:
             command = [str(binary), "attestation", "verify", str(regular(subject)), "--bundle", str(local_bundle),
@@ -757,6 +880,7 @@ def main():
     parser.add_argument("--root", type=Path, default=Path.cwd())
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("sdk37")
+    sub.add_parser("ci-bootstrap", help="Fresh committed bootstrap admission only; does not prepare or publish")
     for name in ("ci-start", "ci-check", "pack"):
         child = sub.add_parser(name)
         child.add_argument("--state", type=Path, required=True)
@@ -772,7 +896,10 @@ def main():
     for name in ("version", "tag", "source-sha", "source-tree", "tag-object", "branch-tip"):
         child.add_argument("--" + name, required=True)
     args = parser.parse_args()
-    if args.command == "sdk37":
+    if args.command == "ci-bootstrap":
+        bootstrap_preflight(args.root, os.environ)
+        print("Fresh committed source/bootstrap/owner admitted; no candidate or native execution yet.")
+    elif args.command == "sdk37":
         root = existing_sdk37(os.environ)
         with Path(os.environ["GITHUB_ENV"]).open("a") as stream:
             require("\n" not in root and "\r" not in root, "Unsafe SDK path")
@@ -780,7 +907,7 @@ def main():
         print("Existing SDK37 metadata/android.jar agree; no SDK acquisition.")
     elif args.command in ("ci-start", "ci-check", "pack"):
         require(not args.state.resolve().is_relative_to(args.root.resolve()), "Keep receipts outside checkout/bundle")
-        state = ci_state(args.root, os.environ, fresh=args.command == "ci-start")
+        state = ci_state(args.root, os.environ, fresh=args.command == "ci-start", bootstrap=True)
         if args.command == "ci-start":
             write_new(args.state, json.dumps(state, sort_keys=True).encode())
             emit_outputs({k: state[k] for k in ("candidate", "version", "source_tree", "workflow_sha256")})
@@ -793,7 +920,8 @@ def main():
                 require(not args.output.resolve().is_relative_to(args.root.resolve()), "Keep archive outside checkout")
                 result = archive_bundle(args.root / "build/publication-bytes/bundle", args.output,
                                         state["version"], state["files"])
-                require(ci_state(args.root, os.environ) == state, "Committed inputs changed during packing")
+                require(ci_state(args.root, os.environ, bootstrap=True) == state,
+                        "Committed inputs/native profile changed during packing")
                 emit_outputs(result)
                 print(json.dumps(result, sort_keys=True))
     elif args.command == "intake":

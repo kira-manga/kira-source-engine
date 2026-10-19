@@ -1,5 +1,6 @@
 """Synthetic policy fixtures plus tiny local Git lineage cases; no network, Gradle, gh or provenance."""
 
+import ast
 import copy
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -8,11 +9,14 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import publication_policy as p
 
@@ -221,7 +225,8 @@ class SourceAgreementTests(OwnedFixture):
         with self.assertRaises(p.Refusal):
             p.source_snapshot(root, SHA, fresh=True)
 
-    def test_snapshot_cli_is_check_only_and_pack_refuses(self):
+    @mock.patch.object(p, "bootstrap_profile", return_value={"fixture": "not native qualification"})
+    def test_snapshot_cli_is_check_only_and_pack_refuses(self, _profile):
         root = self.checkout("0.1.0-SNAPSHOT")
         state, output = self.root / "before.json", self.root / "github-output.txt"
         env = {**context(), "GITHUB_OUTPUT": str(output)}
@@ -274,6 +279,269 @@ class SourceAgreementTests(OwnedFixture):
         path.symlink_to(root / "build.gradle.kts")
         with self.assertRaises(p.Refusal):
             p.source_snapshot(root, SHA)
+
+
+class BootstrapAdmissionTests(OwnedFixture):
+    """Actual pinned verify code over synthetic files; no download/native execution.
+
+    Host and committed-source observations are synthetic here. The separate
+    hosted Native receipt, not these tests, qualifies the real compiler/library.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for name, value in (("system", "Darwin"), ("machine", "arm64")):
+            patcher = mock.patch.object(p.platform, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.repo = self.root / "checkout"
+        self.repo.mkdir()
+        original_repo = Path(p.__file__).resolve().parents[2]
+        inputs = source_bytes()
+        inputs["gradle/libs.versions.toml"] = b'kotlin = "2.2.21"\n'
+        inputs.update({name: (original_repo / name).read_bytes() for name in p.BOOTSTRAP_FILES})
+        for name, data in inputs.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self.source = {"source_sha": SHA, "source_tree": TREE, "workflow_sha256": p.digest(inputs[p.WORKFLOW]),
+                       "files": {name: {"size": len(data), "sha256": p.digest(data), "mode": "100644"}
+                                 for name, data in inputs.items()}}
+        temp = self.root / "runner"
+        temp.mkdir()
+        self.runtime = temp / "kira-ci-31-2"
+        self.runtime.mkdir(mode=0o700)
+        (self.runtime / "gradle").mkdir(mode=0o700)
+        self.env = {**context(), "HOME": str(self.root), "GITHUB_ACTIONS": "true", "RUNNER_OS": "macOS",
+                    "RUNNER_ARCH": "ARM64", "RUNNER_TEMP": str(temp), "KIRA_CI_ROOT": str(self.runtime),
+                    "GRADLE_USER_HOME": str(self.runtime / "gradle")}
+        owner = {"repository": p.REPOSITORY, "run_id": "31", "run_attempt": "2",
+                 "source_sha": SHA, "root": str(self.runtime)}
+        (self.runtime / "owner.json").write_text(json.dumps(owner))
+        self.helper = p.committed_bootstrap(self.repo, self.env, self.source)
+        self.owned = self.helper.owned_root(self.env)
+        self.helper.create_owned_root(self.owned, self.env)
+        pin = self.helper.pins(self.repo)
+        self.home = self.owned / "compiler" / pin["compiler"]["archive_root"]
+        (self.home / "konan").mkdir(parents=True)
+        (self.home / "tools").mkdir()
+        (self.owned / "data").mkdir()
+        install = self.owned / "install"
+        for name in ("lib/libffi.a", "include/ffi.h", "include/ffitarget.h", "lib/pkgconfig/libffi.pc"):
+            path = install / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"SYNTHETIC FILE, NOT A NATIVE LIBRARY\n")
+        original = b"libffiDir.macos_arm64=libffi-3.3-1-macos-arm64\ndependencyProfiles=default alt\n"
+        config = self.home / "konan/konan.properties"
+        config.write_bytes(self.helper.profile_bytes(original, install))
+        state = {"owner": self.helper.owner(self.owned, self.env), "status": "prepared",
+                 "inputs": self.helper.state_inputs(self.repo, pin), "native_home": str(self.home),
+                 "konan_data_dir": str(self.owned / "data"), "gradle_build_cache": False,
+                 "original_konan_properties_sha256": p.digest(original),
+                 "configured_konan_properties_sha256": self.helper.digest(config),
+                 "env_blacklist_sha256": None, "installed_files": self.helper.install_hashes(install),
+                 "verification_count": 0, "build": {"fixture": "NOT hosted provenance"}}
+        self.helper.write_json(self.owned / self.helper.STATE, state)
+        self.env.update(GRADLE_OPTS=self.helper.NATIVE_HOME + str(self.home) + " " + self.helper.CACHE_OFF,
+                        KONAN_DATA_DIR=str(self.owned / "data"))
+
+    def verify(self, env=None):
+        return p.bootstrap_profile(self.repo, self.env if env is None else env, self.source)
+
+    def test_exact_profile_is_reverified_and_stable_between_ci_phases(self):
+        with mock.patch.object(p, "source_snapshot", return_value=self.source) as snapshot:
+            before = p.ci_state(self.repo, self.env, fresh=True, bootstrap=True)
+            after = p.ci_state(self.repo, self.env, bootstrap=True)
+        self.assertEqual(before, after)
+        snapshot.assert_has_calls([mock.call(self.repo, SHA, True), mock.call(self.repo, SHA, False)])
+        self.assertEqual(before["native_bootstrap"]["reviewed_files"], p.BOOTSTRAP_FILES)
+        self.assertNotIn("verification_count", before["native_bootstrap"]["profile"])
+        self.assertEqual(self.helper.read_json(self.owned / self.helper.STATE)["verification_count"], 2)
+
+    def test_general_and_intake_environment_guards_remain_closed(self):
+        with self.assertRaises(p.Refusal):
+            p.check_environment(self.env)
+        with mock.patch.object(p, "source_snapshot") as snapshot, self.assertRaises(p.Refusal):
+            p.ci_state(self.repo, self.env)  # Linux attestation/intake uses this unchanged path.
+        snapshot.assert_not_called()
+
+    def test_exact_options_only_no_extra_duplicate_reordered_or_empty_admission(self):
+        expected_options = self.env["GRADLE_OPTS"]
+        for value in ("", expected_options + " ", " " + expected_options, expected_options + " -Xmx1g",
+                      expected_options + " " + self.helper.CACHE_OFF,
+                      " ".join(reversed(expected_options.split())), expected_options.replace("false", "true"),
+                      expected_options.replace(str(self.home), "/tmp/foreign-compiler"),
+                      expected_options + " @extra-arguments", expected_options + "\n"):
+            with self.subTest(options=value), self.assertRaises(p.Refusal):
+                self.verify({**self.env, "GRADLE_OPTS": value})
+        for key in ("VERSION_NAME", "ORG_GRADLE_PROJECT_VERSION_NAME", "JAVA_OPTS", "JAVA_TOOL_OPTIONS",
+                    "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "KONAN_HOME", "KOTLIN_NATIVE_HOME"):
+            with self.subTest(key=key), self.assertRaises(p.Refusal):
+                self.verify({**self.env, key: ""})
+        for name in ("gradle.properties", "init.gradle", "init.gradle.kts", "init.d"):
+            path = self.runtime / "gradle" / name
+            path.write_text("unreviewed input")
+            with self.subTest(user_input=name), self.assertRaises(p.Refusal):
+                self.verify()
+            path.unlink()
+
+    def test_foreign_owner_paths_and_host_are_not_profile_exceptions(self):
+        for key, value in (("GITHUB_REPOSITORY", "fork/kira-source-engine"), ("GITHUB_RUN_ID", "32"),
+                           ("GITHUB_RUN_ATTEMPT", "3"), ("GITHUB_SHA", "b" * 40),
+                           ("KIRA_CI_ROOT", str(self.root)), ("GRADLE_USER_HOME", str(self.root)),
+                           ("KONAN_DATA_DIR", str(self.root)), ("RUNNER_OS", "Linux"),
+                           ("RUNNER_ARCH", "X64"), ("GITHUB_ACTIONS", "false")):
+            with self.subTest(key=key), self.assertRaises(p.Refusal):
+                self.verify({**self.env, key: value})
+        for name, value in (("system", "Linux"), ("machine", "x86_64")):
+            with mock.patch.object(p.platform, name, return_value=value), self.assertRaises(p.Refusal):
+                self.verify()
+        marker = self.runtime / "owner.json"
+        owner = json.loads(marker.read_text())
+        marker.write_text(json.dumps({**owner, "source_sha": "b" * 40}))
+        with self.assertRaises(p.Refusal):
+            self.verify()
+
+    def test_committed_helper_and_manifest_pins_checked_before_loading(self):
+        for name in p.BOOTSTRAP_FILES:
+            path = self.repo / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"\nchanged")
+            with self.subTest(file=name), self.assertRaises(p.Refusal):
+                self.verify()
+            path.write_bytes(original)
+            facts = self.source["files"][name]
+            saved = facts["sha256"]
+            facts["sha256"] = "0" * 64
+            with self.subTest(committed_file=name), self.assertRaises(p.Refusal):
+                self.verify()
+            facts["sha256"] = saved
+
+    def test_library_configuration_blacklist_and_prebuilt_tampering_refused(self):
+        for path in (self.owned / "install/lib/libffi.a", self.home / "konan/konan.properties"):
+            original = path.read_bytes()
+            path.write_bytes(original + b"changed")
+            with self.subTest(file=path.name), self.assertRaises(p.Refusal):
+                self.verify()
+            path.write_bytes(original)
+        for path, data in ((self.home / "tools/env_blacklist", b"KONAN_DATA_DIR\n"),
+                           (self.owned / "data/.extracted", self.helper.DEPENDENCY.encode()),
+                           (self.owned / "data" / (self.helper.DEPENDENCY + ".tar.gz"), b"disputed prebuilt")):
+            path.write_bytes(data)
+            with self.subTest(file=path.name), self.assertRaises(p.Refusal):
+                self.verify()
+            path.unlink()
+
+    def test_private_owner_permissions_and_symlink_redirection_refused(self):
+        self.runtime.chmod(0o755)
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        self.runtime.chmod(0o700)
+        gradle = self.runtime / "gradle"
+        saved = self.runtime / "saved-gradle"
+        gradle.rename(saved)
+        gradle.symlink_to(saved, target_is_directory=True)
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        gradle.unlink()
+        saved.rename(gradle)
+        marker = self.owned / self.helper.MARKER
+        owner = self.helper.read_json(marker)
+        self.helper.write_json(marker, {**owner, "run_attempt": "99"}, replace=True)
+        with self.assertRaises(p.Refusal):
+            self.verify()
+
+    def test_preflight_requires_absent_bootstrap_and_unprepared_strict_environment(self):
+        unprepared = {k: v for k, v in self.env.items() if k not in ("GRADLE_OPTS", "KONAN_DATA_DIR")}
+        with mock.patch.object(p, "source_snapshot", return_value=self.source) as snapshot:
+            with self.assertRaises(p.Refusal):
+                p.bootstrap_preflight(self.repo, self.env)
+            with self.assertRaises(p.Refusal):
+                p.bootstrap_preflight(self.repo, unprepared)  # Existing marked tree is not reusable.
+            self.helper.cleanup(self.env)  # Synthetic owned fixture only, not native cleanup qualification.
+            with self.assertRaises(p.Refusal):
+                p.bootstrap_preflight(self.repo, unprepared)  # Prior small provenance also refuses reuse.
+            (self.owned.parent / self.helper.PROVENANCE).unlink()
+            p.bootstrap_preflight(self.repo, unprepared)
+            snapshot.assert_called_with(self.repo, SHA, True)
+            for key in ("GRADLE_OPTS", "KONAN_DATA_DIR", "KONAN_HOME", "KOTLIN_NATIVE_HOME"):
+                with self.subTest(key=key), self.assertRaises(p.Refusal):
+                    p.bootstrap_preflight(self.repo, {**unprepared, key: ""})
+
+    def test_cli_start_check_and_pack_each_require_live_unchanged_profile(self):
+        state = self.runtime / "before.json"
+        env = {**self.env, "GITHUB_OUTPUT": str(self.runtime / "outputs.txt")}
+
+        def cli(command):
+            argv = ["policy", "--root", str(self.repo), command, "--state", str(state)]
+            if command == "pack":
+                argv += ["--output", str(self.runtime / p.ARCHIVE)]
+            with mock.patch.dict(p.os.environ, env, clear=True), mock.patch.object(p.sys, "argv", argv), \
+                    redirect_stdout(io.StringIO()):
+                p.main()
+
+        with mock.patch.object(p, "source_snapshot", return_value=self.source):
+            cli("ci-start")
+            cli("ci-check")
+            # Archive byte handling is covered separately; prove both pack-boundary
+            # profile checks without pretending this synthetic cohort is real.
+            with mock.patch.object(p, "archive_bundle", return_value={}) as archive:
+                cli("pack")
+                archive.assert_called_once()
+            self.assertEqual(self.helper.read_json(self.owned / self.helper.STATE)["verification_count"], 4)
+            env["GRADLE_OPTS"] += " -Xmx1g"
+            with self.assertRaises(p.Refusal):
+                cli("ci-check")
+            with mock.patch.object(p, "archive_bundle") as archive, self.assertRaises(p.Refusal):
+                cli("pack")
+            archive.assert_not_called()
+            env["GRADLE_OPTS"] = self.env["GRADLE_OPTS"]
+            receipt = self.helper.read_json(self.owned / self.helper.STATE)
+            receipt["build"] = {"fixture": "changed after admission"}
+            self.helper.write_json(self.owned / self.helper.STATE, receipt, replace=True)
+            with self.assertRaises(p.Refusal):
+                cli("ci-check")
+            with mock.patch.object(p, "archive_bundle") as archive, self.assertRaises(p.Refusal):
+                cli("pack")
+            archive.assert_not_called()
+
+
+class WorkflowSyntaxTests(unittest.TestCase):
+    def test_ci_shell_blocks_and_inline_python_parse_without_execution(self):
+        # Bounded extraction for this workflow's literal/folded run blocks, not a
+        # GitHub/YAML validator. bash -n and ast.parse execute no workflow commands.
+        lines = (Path(p.__file__).resolve().parents[2] / p.WORKFLOW).read_text().splitlines()
+        scripts = []
+        for index, line in enumerate(lines):
+            match = re.fullmatch(r"( +)run: (.*)", line)
+            if not match:
+                continue
+            indent, value = len(match[1]), match[2]
+            if value not in ("|", ">-"):
+                scripts.append(value + "\n")
+                continue
+            block = []
+            for following in lines[index + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                self.assertTrue(not following.strip() or following.startswith(" " * (indent + 2)))
+                block.append(following[indent + 2:])
+            scripts.append(("\n" if value == "|" else " ").join(block) + "\n")
+        self.assertGreaterEqual(len(scripts), 10)
+        for index, script in enumerate(scripts):
+            with self.subTest(block=index):
+                result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                source, inside = [], False
+                for line in script.splitlines():
+                    if inside and line == "PY":
+                        ast.parse("\n".join(source))
+                        source, inside = [], False
+                    elif inside:
+                        source.append(line)
+                    elif "<<'PY'" in line:
+                        inside = True
+                self.assertFalse(inside, "Unclosed literal Python heredoc")
 
 
 class SdkTests(OwnedFixture):
@@ -544,6 +812,9 @@ class NativeAdapterAndIntakeTests(OwnedFixture):
             self.assertIn("--deny-self-hosted-runners", command)
             self.assertTrue(execute.call_args.kwargs["check"])
             self.assertNotIn("GH_TOKEN", execute.call_args.kwargs["env"])
+            self.assertEqual(execute.call_args.kwargs["env"]["XDG_CONFIG_HOME"],
+                             str(Path(command[0]).parent / "config"))
+            self.assertFalse(Path(command[0]).parent.exists())
             execute.return_value = subprocess.CompletedProcess([], 0, b'{"verified":true}', b"")
             with self.assertRaises(p.Refusal):
                 p.native_verify(asset, bundle, [subject], expected())
@@ -574,6 +845,185 @@ class NativeAdapterAndIntakeTests(OwnedFixture):
             (checkout / "gradle.properties").write_text("VERSION_NAME=0.1.0-SNAPSHOT\n")
             with self.assertRaises(p.Refusal):
                 p.completed_intake(checkout, e, receipts(), archive, "unused", "unused")
+
+
+class NativeDarwinAdapterTests(OwnedFixture):
+    """Synthetic ZIPs and mocked subprocesses only; never execute the official macOS binary."""
+
+    def setUp(self):
+        super().setUp()
+        self.asset = self.root / p.GH_DARWIN_ASSET
+        self.bundle = self.root / "fixture.json"
+        self.bundle.write_text('{"fixture":"not a signed bundle"}')
+        self.subjects = [self.root / p.ARCHIVE, self.root / "inventory.tsv"]
+        for subject in self.subjects:
+            subject.write_bytes(b"synthetic subject")
+        self.payload = b"synthetic macOS executable placeholder; NEVER EXECUTED"
+        self.temporary_directories = []
+        self.real_temporary = tempfile.TemporaryDirectory
+        self.system = self.patch(p.platform, "system", return_value="Darwin")
+        self.machine = self.patch(p.platform, "machine", return_value="arm64")
+        self.patch(p.tempfile, "TemporaryDirectory", side_effect=self.native_temporary)
+        self.execute = self.patch(p.subprocess, "run")
+        self.execute.return_value = subprocess.CompletedProcess([], 0, json.dumps(native_output()).encode(), b"")
+        self.write_zip()
+
+    def patch(self, target, name, **kwargs):
+        patcher = mock.patch.object(target, name, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def native_temporary(self, **kwargs):
+        temporary = self.real_temporary(dir=self.root, **kwargs)
+        self.temporary_directories.append(Path(temporary.name))
+        return temporary
+
+    def write_zip(self, entries=None):
+        if entries is None:
+            entries = [(p.GH_DARWIN_MEMBER, self.payload, stat.S_IFREG | 0o755),
+                       ("../not-extracted", b"ignored archive member", stat.S_IFREG | 0o644)]
+        with zipfile.ZipFile(self.asset, "w") as archive:
+            for name, data, mode in entries:
+                member = zipfile.ZipInfo(name)
+                member.create_system = 3
+                member.external_attr = mode << 16
+                member.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(member, data)
+
+    def alter_member(self, offset, width, value):
+        data = bytearray(self.asset.read_bytes())
+        index = data.index(b"PK\x01\x02") + offset
+        data[index:index + width] = value.to_bytes(width, "little")
+        self.asset.write_bytes(data)
+
+    def verify(self):
+        with mock.patch.object(p, "GH_DARWIN_ASSET_SHA256", p.digest(self.asset.read_bytes())):
+            p.native_verify(self.asset, self.bundle, self.subjects, expected())
+
+    def assert_clean(self):
+        self.assertTrue(all(not path.exists() for path in self.temporary_directories))
+        self.assertFalse((self.root / "not-extracted").exists())
+
+    def assert_refused(self):
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        self.execute.assert_not_called()
+        self.assert_clean()
+
+    def test_darwin_zip_uses_pinned_bytes_exact_command_and_private_cleanup(self):
+        commands = []
+
+        def execute(command, **kwargs):
+            binary = Path(command[0])
+            local_bundle = binary.parent / "bundle.json"
+            self.assertEqual(binary.read_bytes(), self.payload)
+            self.assertEqual(stat.S_IMODE(binary.stat().st_mode), 0o700)
+            self.assertEqual({item.name for item in binary.parent.iterdir()}, {"gh", "bundle.json", "config"})
+            config = binary.parent / "config"
+            self.assertTrue(config.is_dir())
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o700)
+            (config / "gh").mkdir(exist_ok=True)
+            (config / "gh" / "config.yml").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(local_bundle.read_bytes(), self.bundle.read_bytes())
+            self.assertEqual(command[1:], ["attestation", "verify", str(self.subjects[len(commands)]),
+                "--bundle", str(local_bundle), "--hostname", "github.com", "--repo", p.REPOSITORY,
+                "--format", "json", "--predicate-type", p.PREDICATE, "--cert-identity", p.SIGNER,
+                "--cert-oidc-issuer", p.ISSUER, "--signer-digest", SHA, "--source-ref", p.REF,
+                "--source-digest", SHA, "--deny-self-hosted-runners"])
+            self.assertEqual(kwargs, {"env": {"PATH": os.defpath, "HOME": str(binary.parent),
+                "XDG_CONFIG_HOME": str(config), "GH_HOST": "github.com",
+                "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}, "check": True,
+                "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 120})
+            commands.append(command)
+            return subprocess.CompletedProcess([], 0, json.dumps(native_output()).encode(), b"")
+
+        original_read = p.read_small
+
+        def replace_asset_after_pin(path):
+            data = original_read(path)
+            self.asset.write_bytes(b"unadmitted replacement after asset read")
+            return data
+
+        self.execute.side_effect = execute
+        with mock.patch.object(p, "read_small", side_effect=replace_asset_after_pin), \
+             mock.patch.dict(os.environ, {"GH_TOKEN": "ignored", "GITHUB_TOKEN": "ignored", "HTTPS_PROXY": "ignored"}):
+            self.verify()
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(self.temporary_directories), 1)
+        self.assert_clean()
+
+    def test_unsupported_platforms_refuse_before_reading_assets(self):
+        with mock.patch.object(p, "regular") as read:
+            for system, machine in (("Darwin", "x86_64"), ("Darwin", "aarch64"), ("Linux", "arm64"),
+                                    ("Windows", "ARM64"), ("linux", "x86_64")):
+                with self.subTest(system=system, machine=machine), self.assertRaises(p.Refusal):
+                    self.system.return_value, self.machine.return_value = system, machine
+                    p.native_verify(self.asset, self.bundle, self.subjects, expected())
+            read.assert_not_called()
+        self.execute.assert_not_called()
+        self.assertEqual(self.temporary_directories, [])
+
+    def test_darwin_requires_its_own_pin_not_linux_or_an_ambient_binary(self):
+        with mock.patch.object(p, "GH_ASSET_SHA256", p.digest(self.asset.read_bytes())), \
+             mock.patch.dict(os.environ, {"PATH": "/untrusted", "GH_TOKEN": "ignored"}), \
+             self.assertRaises(p.Refusal):
+            p.native_verify(self.asset, self.bundle, self.subjects, expected())
+        self.execute.assert_not_called()
+        self.assertEqual(self.temporary_directories, [])
+
+    def test_archive_and_entry_limits_refuse_before_native(self):
+        self.asset.write_bytes(b"x" * 1025)
+        with mock.patch.object(p, "MAX_META", 128):
+            self.assert_refused()
+        self.assertEqual(self.temporary_directories, [])
+        self.write_zip()
+        with mock.patch.object(p, "MAX_ENTRIES", 1):
+            self.assert_refused()
+        self.assertEqual(len(self.temporary_directories), 1)
+
+    def test_exact_regular_member_and_length_limits_are_enforced(self):
+        regular = (p.GH_DARWIN_MEMBER, self.payload, stat.S_IFREG | 0o755)
+        cases = {"missing": [("other/bin/gh", self.payload, stat.S_IFREG | 0o755)],
+                 "duplicate": [regular, regular],
+                 "symlink": [(p.GH_DARWIN_MEMBER, b"other", stat.S_IFLNK | 0o777)],
+                 "directory": [(p.GH_DARWIN_MEMBER, b"", stat.S_IFDIR | 0o755)],
+                 "empty": [(p.GH_DARWIN_MEMBER, b"", stat.S_IFREG | 0o755)]}
+        for name, entries in cases.items():
+            with self.subTest(case=name):
+                if name == "duplicate":
+                    with self.assertWarns(UserWarning):
+                        self.write_zip(entries)
+                else:
+                    self.write_zip(entries)
+                self.assert_refused()
+        # Mutate real ZIP central-directory fields, not ZipInfo/open mocks.
+        for name, offset, width, value in (("oversized", 24, 4, p.MAX_META * 8 + 1),
+                ("declared-length", 24, 4, len(self.payload) + 1), ("encrypted", 8, 2, 1),
+                ("compression", 10, 2, 99), ("non-unix", 5, 1, 0)):
+            with self.subTest(case=name):
+                self.write_zip([regular])
+                self.alter_member(offset, width, value)
+                self.assert_refused()
+
+    def test_invalid_zip_and_verifier_failures_always_clean(self):
+        self.asset.write_bytes(b"not a ZIP despite an admitted synthetic hash")
+        self.assert_refused()
+        self.write_zip()
+        data = self.asset.read_bytes()
+        checksum_offset = data.index(b"PK\x01\x02") + 16
+        self.alter_member(16, 4, int.from_bytes(data[checksum_offset:checksum_offset + 4], "little") ^ 1)
+        self.assert_refused()
+        self.write_zip()
+        self.execute.return_value = subprocess.CompletedProcess([], 0, b'{"verified":true}', b"")
+        with self.assertRaises(p.Refusal):
+            self.verify()
+        self.assert_clean()
+        self.execute.side_effect = subprocess.CalledProcessError(1, ["mock native verifier"])
+        with mock.patch.object(p, "_verified_policy") as verify_policy:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.verify()
+            verify_policy.assert_not_called()
+        self.assert_clean()
 
 
 class FiniteHoldTests(unittest.TestCase):

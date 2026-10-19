@@ -8,12 +8,14 @@ import me.manga.kira.source.contracts.model.IconSpec
 import me.manga.kira.source.contracts.model.SourceConfig
 import me.manga.kira.source.contracts.model.SourceConfigDocument
 import me.manga.kira.source.engine.internal.HeaderNamePolicy
+import me.manga.kira.source.engine.internal.Templates
 
 /**
  * Schema + referential validator. Runs after signature verification, before any source is trusted.
- * Two jobs: (1) the document is structurally sane (supported schema, non-blank keys, URL-shaped
+ * Checks that (1) the document is structurally sane (supported schema, non-blank keys, URL-shaped
  * base), and (2) every strategy/transform/date/pagination name a `generic` source references is one
- * this build ships (via [StrategyRegistry]). Archived descriptors remain parseable for migration
+ * this build ships (via [StrategyRegistry]), with (3) consumed declarations checked by
+ * [SourceDeclarationCapabilities]. Archived descriptors remain parseable for migration
  * tooling, but the shipping catalog manager independently rejects every non-generic entry.
  *
  * Errors are collected (not fail-fast) and keyed by api so a whole batch can be diagnosed at once.
@@ -21,6 +23,8 @@ import me.manga.kira.source.engine.internal.HeaderNamePolicy
 class DefaultSourceConfigValidator(
     private val strategies: StrategyRegistry,
 ) : SourceConfigValidator {
+    private val declarationCapabilities = SourceDeclarationCapabilities(strategies)
+
     override fun validate(document: SourceConfigDocument): ValidationResult {
         val errors = mutableListOf<String>()
 
@@ -156,6 +160,9 @@ class DefaultSourceConfigValidator(
         validateEndpoints(source, tag, errors)
         validateFields(source, tag, errors)
         validateSearchFilters(source, tag, errors)
+        declarationCapabilities.validate(source).forEach { finding ->
+            errors += "$tag ${finding.path}: [${finding.code}] ${finding.message}"
+        }
     }
 
     private fun validateLifecycleMetadata(
@@ -200,6 +207,9 @@ class DefaultSourceConfigValidator(
         errors: MutableList<String>,
     ) {
         for ((verb, spec) in source.endpoints) {
+            if (spec.singlePage && verb !in setOf("home", "featured", "search")) {
+                errors += "$tag endpoint '$verb' singlePage is only supported for list feeds"
+            }
             if (spec.url.isBlank()) errors += "$tag endpoint '$verb' has a blank url"
             // The raw {query} var is the UNENCODED search term — legitimate only in formBody
             // values (the executor form-encodes those). In a URL it must be {queryEncoded} and in
@@ -219,6 +229,15 @@ class DefaultSourceConfigValidator(
             }
             if (spec.format.isNotEmpty() && spec.format !in SUPPORTED_FORMATS) {
                 errors += "$tag endpoint '$verb' has unknown format '${spec.format}'"
+            }
+            if (spec.format == "dilar-ecies-v16" && (
+                    verb != "pages" || spec.method.lowercase() !in setOf("", "get") ||
+                        spec.url != "{baseUrl}/api/chapters/{chapterId}" || source.baseUrl != "https://dilar.tube" ||
+                        source.usesCapturedHeaders || source.headers.isNotEmpty() ||
+                        spec.formBody.isNotEmpty() || spec.jsonBody.isNotEmpty()
+                )
+            ) {
+                errors += "$tag encrypted reader requires its compiled HTTPS endpoint and private header-free transport"
             }
             for (filter in spec.listFilters) {
                 if (filter.op !in SUPPORTED_FILTER_OPS) {
@@ -418,10 +437,10 @@ class DefaultSourceConfigValidator(
         // must be guaranteed (path) and the placeholder must actually exist in the template.
         val isPlaceholderTarget = request.target == "path" || request.target == "body-json"
         if (isPlaceholderTarget) {
-            if (!request.param.matches(PLACEHOLDER_NAME)) {
+            if (!Templates.isVariableName(request.param)) {
                 errors += "$ftag request.param: placeholder name must match [a-zA-Z0-9_]+"
             }
-            if (request.param in RESERVED_TEMPLATE_VARS) {
+            if (request.param in Templates.REQUEST_VARIABLES) {
                 errors += "$ftag request.param: '${request.param}' shadows a reserved engine template var"
             }
         }
@@ -634,7 +653,7 @@ class DefaultSourceConfigValidator(
                 "post_json",
                 "postjson",
             )
-        private val SUPPORTED_FORMATS = setOf("json", "html", "script-json")
+        private val SUPPORTED_FORMATS = setOf("json", "html", "script-json", "dilar-ecies-v16")
         private val SUPPORTED_FILTER_OPS = setOf("equals", "notEquals", "contains", "notNull", "isNull")
         private val SUPPORTED_FILTER_MODES = setOf("include", "exclude")
 
@@ -648,21 +667,5 @@ class DefaultSourceConfigValidator(
         private val POST_FORM_METHODS = setOf("post-form", "post_form", "postform")
         private val POST_JSON_METHODS = setOf("post-json", "post_json", "postjson")
         private val FILTER_ID = Regex("[a-z0-9_]{1,64}")
-        private val PLACEHOLDER_NAME = Regex("[a-zA-Z0-9_]+")
-
-        /** Vars `GenericSourceClient.vars()` always seeds — a filter placeholder must not shadow them. */
-        private val RESERVED_TEMPLATE_VARS =
-            setOf(
-                "baseUrl",
-                "imageBase",
-                "page",
-                "pageOffset",
-                "query",
-                "queryEncoded",
-                "queryJson",
-                "itemUrl",
-                "chapterUrl",
-                "id",
-            )
     }
 }

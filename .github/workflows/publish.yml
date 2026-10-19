@@ -1,18 +1,534 @@
-name: Package publication disabled (Engine6 containment)
+name: Protected single-owner source publication
+
+# Only the protected native publisher may upload the independently selected immutable cohort.
+# A separate owner-approved, protected metadata probe holds mutation-capable credentials but only performs GET.
+# Single-owner PR policy retains required CI; real named environment approval,
+# no admin bypass, fresh writer-window admission and exact native byte guards remain.
 
 on:
   workflow_dispatch:
+    inputs:
+      selection:
+        description: Exact producer tuple, source_branch_tip, tag_object, parity references and finite release_window (no credentials)
+        required: true
+        type: string
+      access_check:
+        description: Verify provisioned policy/package read credentials after native approval; cannot publish
+        required: false
+        type: boolean
+        default: false
 
-permissions: {}
+      metadata_audit_check:
+        description: Verify separate classic metadata-audit environment custody with fixed GETs; cannot publish
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+concurrency:
+  group: engine-protected-publication
+  cancel-in-progress: false # This is NOT exclusion of other or out-of-band writers.
 
 jobs:
-  refuse-publication:
+  approval-and-access-check:
+    if: >-
+      ${{ inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch' &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_id == '1310736214' &&
+          github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    # Fixed, owner-authorized environment. This job has no publisher outputs or write authority.
+    environment: source-publication
     runs-on: ubuntu-24.04
-    timeout-minutes: 1
+    timeout-minutes: 5 # At most 30 classic and four diagnostic-only version reads; no retries.
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - name: Refuse remote package publication
+      - name: Check out only the reviewed read helpers without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: access-check
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/scripts/publication_policy.py
+            /.github/scripts/github_publication_receipts.py
+            /.github/scripts/remote_maven_readback.py
+
+      - name: Verify provisioned policy and package credentials through their actual read ports
+        env:
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_DIAGNOSTIC_JOB_READ_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          printf '%s\n' '::error::Remote package publication is disabled by Engine6 current-source containment.'
-          printf '%s\n' 'No checkout, build or upload is performed. See README.md for the open release gates.'
-          exit 1
+          python3 -B -E -s - <<'PY'
+          import json, os, pathlib, re, sys, urllib.parse, xml.etree.ElementTree as ET
+          policy_token = os.environ.pop('KIRA_PUBLICATION_API_READ_TOKEN')
+          package_token = os.environ.pop('KIRA_PACKAGES_READ_TOKEN')
+          job_token = os.environ.pop('KIRA_DIAGNOSTIC_JOB_READ_TOKEN')
+          helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check/.github/scripts'
+          sys.path.insert(0, str(helpers))
+          import github_publication_receipts as receipts
+          import remote_maven_readback as reader
+          failed = []
+          def check(name, operation, *, context=None, required=True):
+              record = {'check': name, 'read_only': True, **(context or {})}
+              try:
+                  details = operation()
+                  print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
+                      {**record, 'result': 'PASS', **details}, sort_keys=True), flush=True)
+                  return details
+              except Exception as error:
+                  if required:
+                      failed.append(name)
+                  print('KIRA_CREDENTIAL_CHECK ' + json.dumps(
+                      {**record, 'result': 'FAIL',
+                      'http_status': getattr(error, 'status', None),
+                      'stage': getattr(error, 'stage', None)}, sort_keys=True), flush=True)
+          def api(name, path, accept):
+              def operation():
+                  if not policy_token:
+                      raise ValueError('Missing explicit policy token')
+                  value = receipts.observe_json(path, policy_token)['value']
+                  if not accept(value):
+                      raise ValueError('Unexpected official read identity')
+                  return {'http_status': 200}
+              check(name, operation)
+          repo = '/repos/kira-manga/kira-source-engine'
+          api('repository_metadata', repo, lambda v: v.get('id') == 1310736214)
+          api('administration_read', repo + '/actions/permissions', lambda v: v.get('enabled') is True)
+          api('contents_read', repo + '/git/ref/heads/remediation/production-readiness-2026-09-04',
+              lambda v: v.get('ref') == 'refs/heads/remediation/production-readiness-2026-09-04')
+          api('actions_read', repo + '/actions/runs/39048582890',
+              lambda v: v.get('id') == 39048582890 and v.get('head_sha') == '901bae34291f5baf8dcf104223b27d1d5cd1d15e')
+          api('attestations_read', repo + '/attestations/sha256:9a81ab0ed2befed10ea7c716fdd03d5d8346b74c171fd49df9b7128abff3439b?per_page=1&page=1',
+              lambda v: isinstance(v.get('attestations'), list) and len(v['attestations']) == 1)
+          api('environment_read', repo + '/environments/source-publication',
+              lambda v: v.get('id') == 24588601457 and v.get('can_admins_bypass') is False)
+          api('environment_branch_policy_read', repo + '/environments/source-publication/deployment-branch-policies?per_page=100&page=1',
+              lambda v: v.get('total_count') == 1 and v.get('branch_policies', [{}])[0].get('id') == 63403649)
+          def maven():
+              if not package_token:
+                  raise ValueError('Missing explicit package token')
+              observation = receipts.observe_json('/user', package_token, package_read=True)
+              user = observation['value']
+              actor = user.get('login', '')
+              if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}', actor):
+                  raise ValueError('Invalid package-token account')
+              budget = reader._Budget()
+              budget.requests = 2
+              facts, body = reader._read(
+                  'me/manga/kira/source/source-engine/0.1.0/source-engine-0.1.0.pom',
+                  (actor, package_token), 1048576, budget, capture=True)
+              if b'<!DOCTYPE' in body or b'<!ENTITY' in body:
+                  raise ValueError('POM entity declaration refused')
+              pom = ET.fromstring(body.decode('utf-8'))
+              ns = '{http://maven.apache.org/POM/4.0.0}'
+              if pom.tag != ns + 'project' or [pom.findtext(ns + key) for key in
+                      ('groupId', 'artifactId', 'version')] != ['me.manga.kira.source', 'source-engine', '0.1.0']:
+                  raise ValueError('Known POM identity differs')
+              return {'username': actor, 'oauth_scopes': observation['oauth_scopes'],
+                  'version': '0.1.0', 'size': facts['size'],
+                  'sha256': facts['sha256'], 'requests': 2 - budget.requests}
+          check('provisioned_maven_read', maven)
+          def package_metadata():
+              if not package_token:
+                  raise ValueError('Missing explicit package token')
+              response = receipts.observe_json('/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1',
+                  package_token, collection=True, package_read=True)
+              items = [v for v in response['value'] if (v.get('repository') or {}).get('id') == 1310736214]
+              if len(items) != 15 or len({v.get('id') for v in items}) != 15:
+                  raise ValueError('Complete Engine package inventory required')
+              selected = []
+              for item in sorted(items, key=lambda v: v['name']):
+                  if (type(item.get('id')) is not int or not 0 < item['id'] <= 2**63 - 1 or item.get('package_type') != 'maven'
+                          or not re.fullmatch(r'[A-Za-z0-9_.-]{1,255}', item.get('name', ''))
+                          or item['repository'].get('full_name') != 'kira-manga/kira-source-engine'):
+                      raise ValueError('Unexpected package identity')
+                  selected.append({'id': item['id'], 'name': item['name'],
+                      'repository_id': 1310736214, 'repository': 'kira-manga/kira-source-engine'})
+              expected = {reader.policy.GROUP + '.' + module + suffix for module in reader.policy.MODULES
+                  for suffix in reader.policy.PUBLICATIONS.values()}
+              if {item['name'] for item in selected} != expected:
+                  raise ValueError('Exact fifteen Engine package names required')
+              return {'http_status': 200, 'oauth_scopes': response['oauth_scopes'], 'packages': selected}
+          def versions(item, state, token, *, classic):
+              if not token:
+                  raise receipts.ReceiptObservationRefusal(None, 'token_validation')
+              response = receipts.observe_json('/orgs/kira-manga/packages/maven/' +
+                  urllib.parse.quote(item['name'], safe='') + '/versions?state=' + state + '&per_page=100&page=1',
+                  token, collection=True, package_read=classic)
+              try:
+                  values = reader._versions(response['value'])
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'versions': values}
+          metadata = check('package_identity_and_version_metadata', package_metadata)
+          if metadata is not None:
+              # Comparisons are informational only: never fallback or writer-custody approval.
+              channels = [('classic_package_read', package_token, metadata['packages'], True),
+                  ('policy_read_comparison', policy_token, metadata['packages'][:1], False),
+                  ('job_read_comparison', job_token, metadata['packages'][:1], False)]
+              for channel, token, packages, classic in channels:
+                  for item in packages:
+                      for state in ('active', 'deleted'):
+                          check('package_versions', lambda: versions(item, state, token, classic=classic),
+                              context={'package': item['name'], 'package_id': item['id'], 'state': state,
+                                  'credential_channel': channel, 'required': classic,
+                                  'diagnostic_only': True, 'custody_approval': False}, required=classic)
+          # Every required failure remains terminal even if a diagnostic comparison succeeds.
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Remove only this diagnostic's disposable helper checkout
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'access-check'
+          if root.is_symlink():
+              raise SystemExit('Redirected diagnostic cleanup refused')
+          if root.exists():
+              shutil.rmtree(root)
+          PY
+
+  approval-and-metadata-audit:
+    if: >-
+      ${{ inputs.metadata_audit_check && !inputs.access_check && github.event_name == 'workflow_dispatch' &&
+          github.repository == 'kira-manga/kira-source-engine' && github.repository_id == '1310736214' &&
+          github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    # Owner-authorized deletion-capable environment custody, NOT a read-only credential or release receipt.
+    # The job token has no package-write permission and is never an audit/payload fallback.
+    environment: source-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out only reviewed GET helpers without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: metadata-audit
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/scripts/publication_policy.py
+            /.github/scripts/github_publication_receipts.py
+            /.github/scripts/remote_maven_readback.py
+
+      - name: Verify the actual separate classic metadata-audit adapter without any build
+        env:
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import json, os, pathlib, sys
+          package_token = os.environ.pop('KIRA_PACKAGES_READ_TOKEN')
+          audit_token = os.environ.pop('KIRA_PACKAGES_METADATA_AUDIT_TOKEN')
+          helpers = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'metadata-audit/.github/scripts'
+          sys.path.insert(0, str(helpers))
+          import github_publication_receipts as receipts
+          import remote_maven_readback as reader
+          failed = []
+          audit_scopes = None
+          def check(name, operation, **context):
+              record = {'check': name, 'method': 'GET', 'diagnostic_only': True, 'custody_approval': False, **context}
+              try:
+                  details = operation()
+                  print('KIRA_METADATA_AUDIT ' + json.dumps(
+                      {**record, 'result': 'PASS', **details}, sort_keys=True), flush=True)
+                  return details
+              except Exception as error:
+                  failed.append(name)
+                  print('KIRA_METADATA_AUDIT ' + json.dumps(
+                      {**record, 'result': 'FAIL', 'http_status': getattr(error, 'status', None),
+                          'stage': getattr(error, 'stage', None)}, sort_keys=True), flush=True)
+          def inventory():
+              try:
+                  receipts._validate_read_token(package_token)
+                  receipts._validate_read_token(audit_token)
+                  if not package_token or not audit_token or audit_token == package_token:
+                      raise ValueError('Distinct explicit custody required')
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(None, 'token_validation') from None
+              response = receipts.observe_json('/orgs/kira-manga/packages?package_type=maven&per_page=100&page=1',
+                  package_token, collection=True, package_read=True)
+              try:
+                  items = [v for v in response['value'] if (v.get('repository') or {}).get('id') == 1310736214]
+                  expected = {reader.policy.GROUP + '.' + module + suffix for module in reader.policy.MODULES
+                      for suffix in reader.policy.PUBLICATIONS.values()}
+                  if (len(items) != 15 or {v['name'] for v in items} != expected
+                          or len({v['id'] for v in items}) != 15
+                          or any(type(v['id']) is not int or not 0 < v['id'] <= 2**63 - 1
+                              or v['package_type'] != 'maven'
+                              or v['repository']['full_name'] != 'kira-manga/kira-source-engine' for v in items)):
+                      raise ValueError('Exact Engine inventory required')
+                  packages = [{'id': v['id'], 'name': v['name']} for v in sorted(items, key=lambda v: v['name'])]
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'packages': packages, 'oauth_scopes': response['oauth_scopes']}
+          def versions(item):
+              global audit_scopes
+              # Names come only from the exact trusted fifteen-name inventory above, never dispatch input.
+              response = receipts._get_deleted_versions(item['name'], audit_token)
+              try:
+                  values = reader._versions(response['items'])
+                  if audit_scopes is not None and response['oauth_scopes'] != audit_scopes:
+                      raise ValueError('Audit grants changed')
+                  audit_scopes = response['oauth_scopes']
+              except Exception:
+                  raise receipts.ReceiptObservationRefusal(200, 'response_validation') from None
+              return {'http_status': 200, 'versions': values, 'oauth_scopes': audit_scopes, 'profile': reader.AUDIT_PROFILE}
+          # At most16 GETs. No pagination/retries/redirects; shared production adapters retain their bounds.
+          metadata = check('package_inventory', inventory,
+              credential_channel='payload_read', mutation_capable_credential=False)
+          if metadata is not None:
+              for item in metadata['packages']:
+                  check('deleted_versions', lambda: versions(item),
+                      package=item['name'], package_id=item['id'], state='deleted',
+                      credential_channel='dedicated_classic_metadata_audit', mutation_capable_credential=True)
+          # This mode yields no artifact/output consumed by preflight or the native publisher.
+          raise SystemExit(1 if failed else 0)
+          PY
+
+      - name: Remove only this metadata audit's disposable helper checkout
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -B -E -s - <<'PY'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'metadata-audit'
+          if root.is_symlink():
+              raise SystemExit('Redirected metadata audit cleanup refused')
+          if root.exists():
+              shutil.rmtree(root)
+          PY
+
+  preflight:
+    if: >-
+      ${{ !inputs.access_check && !inputs.metadata_audit_check && github.event_name == 'workflow_dispatch' && github.repository == 'kira-manga/kira-source-engine' &&
+          github.repository_id == '1310736214' && github.ref == 'refs/heads/remediation/production-readiness-2026-09-04' &&
+          github.repository_owner == 'kira-manga' && github.run_attempt == 1 &&
+          github.workflow_ref == format('kira-manga/kira-source-engine/.github/workflows/publish.yml@{0}', github.ref) &&
+          github.workflow_sha == github.sha }}
+    # The controller's separate audit credential is an environment secret, even before intake.
+    environment: source-publication
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    outputs:
+      environment: ${{ steps.intake.outputs.environment }}
+      environment_id: ${{ steps.intake.outputs.environment_id }}
+      record_sha256: ${{ steps.intake.outputs.record_sha256 }}
+      record_artifact_id: ${{ steps.record.outputs.artifact-id }}
+    steps:
+      - name: Check out trusted control source, never producer code as the caller
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Require independently selected policy and prepare this exact publisher invocation
+        id: runtime
+        env:
+          KIRA_PUBLISHER_REQUEST: ${{ inputs.selection }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py prepare-preflight
+
+      - name: Check out the exact producer bytes with complete lineage
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: producer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download only the selected immutable producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.producer_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+
+      - name: Acquire only the pinned public Darwin native verifier distribution
+        timeout-minutes: 2
+        env:
+          PRIVATE_ROOT: ${{ steps.runtime.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          asset="$PRIVATE_ROOT/gh_2.100.0_macOS_arm64.zip"
+          [[ ! -e "$asset" && ! -L "$asset" ]]
+          /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 2 \
+            --noproxy '*' --proxy '' --proto '=https' --proto-redir '=https' \
+            --max-time 60 --max-filesize 67108864 --output "$asset" \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_macOS_arm64.zip
+          # Existing native_verify authenticates these exact bytes before extracting/executing.
+
+      - name: Real fresh native intake and live publisher preflight
+        id: intake
+        timeout-minutes: 10
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py preflight
+
+      - name: Retain the bounded exact comparison for this run, not an approval receipt
+        id: record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-publisher-preflight-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/comparison.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Always remove only this preflight's owned inputs
+        if: ${{ always() }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py cleanup-preflight
+
+  protected-recheck:
+    needs: preflight
+    if: >-
+      ${{ needs.preflight.result == 'success' && needs.preflight.outputs.environment != '' &&
+          needs.preflight.outputs.environment_id != '' && needs.preflight.outputs.record_sha256 != '' &&
+          needs.preflight.outputs.record_artifact_id != '' }}
+    # Only successful preflight against the trusted control policy may produce this name.
+    # Never use inputs.selection or API-discovered defaults as an environment selector.
+    # The owner permits initiator approval; required named review and no admin bypass remain.
+    environment:
+      name: ${{ needs.preflight.outputs.environment }}
+    runs-on: macos-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    steps:
+      - name: Check out the same trusted control source in a new job
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Prepare fresh post-boundary inputs without accepting an approval Boolean
+        id: runtime
+        env:
+          KIRA_PUBLISHER_REQUEST: ${{ inputs.selection }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py prepare-recheck
+
+      - name: Check out the same producer without generated roots or restored caches
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: producer
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Supported Java21 selector for the exact admitted native runtime
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Separate disposable tooling checkout of the same producer without credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.runtime.outputs.producer_sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Reacquire the original selected producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ steps.runtime.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.runtime.outputs.producer_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/artifact
+          merge-multiple: true
+
+      - name: Retrieve only this invocation's pinned comparison artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          repository: kira-manga/kira-source-engine
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ needs.preflight.outputs.record_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.runtime.outputs.root }}/handoff
+          merge-multiple: true
+
+      - name: Reacquire the same pinned public Darwin verifier, never a PATH binary
+        timeout-minutes: 2
+        env:
+          PRIVATE_ROOT: ${{ steps.runtime.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          asset="$PRIVATE_ROOT/gh_2.100.0_macOS_arm64.zip"
+          [[ ! -e "$asset" && ! -L "$asset" ]]
+          /usr/bin/curl --disable --fail --silent --show-error --location --max-redirs 2 \
+            --noproxy '*' --proxy '' --proto '=https' --proto-redir '=https' \
+            --max-time 60 --max-filesize 67108864 --output "$asset" \
+            https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_macOS_arm64.zip
+
+      - name: Fresh authority and sealed-byte checks then original native publication and readback
+        timeout-minutes: 42
+        env:
+          KIRA_SELECTION_SHA256: ${{ steps.runtime.outputs.selection_sha256 }}
+          KIRA_RECORD_SHA256: ${{ needs.preflight.outputs.record_sha256 }}
+          KIRA_PUBLICATION_API_READ_TOKEN: ${{ secrets.KIRA_PUBLICATION_API_READ_TOKEN }}
+          KIRA_PACKAGES_READ_TOKEN: ${{ secrets.KIRA_PACKAGES_READ_TOKEN }}
+          KIRA_PACKAGES_METADATA_AUDIT_TOKEN: ${{ secrets.KIRA_PACKAGES_METADATA_AUDIT_TOKEN }}
+          KIRA_MAVEN_WRITE_USERNAME: ${{ github.actor }}
+          KIRA_MAVEN_WRITE_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py recheck
+
+      - name: Always stop owned workers and preserve required provenance before evidence
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 4
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py finalize-recheck
+
+      - name: Retain bounded native publication and complete remote readback evidence
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kira-publisher-${{ github.run_id }}-1
+          path: ${{ steps.runtime.outputs.root }}/diagnostics/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
+
+      - name: Dispose only finalized owned intake and generated output
+        if: ${{ always() && steps.runtime.outputs.root != '' }}
+        timeout-minutes: 2
+        run: /usr/bin/python3 -B -E -s .github/scripts/publisher_workflow.py cleanup-recheck

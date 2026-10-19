@@ -2,20 +2,29 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.io.File
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.CREATE_NEW
+import java.nio.file.StandardOpenOption.WRITE
+import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 import java.util.HexFormat
 import java.util.Properties
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 import org.gradle.api.GradleException
+import org.gradle.api.Action
 import org.gradle.api.Named
 import org.gradle.api.Project
 import org.gradle.api.Task
@@ -25,6 +34,8 @@ import org.gradle.api.attributes.AttributeContainer
 import org.gradle.api.component.ComponentWithCoordinates
 import org.gradle.api.component.ComponentWithVariants
 import org.gradle.api.component.SoftwareComponentVariant
+import org.gradle.api.artifacts.repositories.PasswordCredentials
+import org.gradle.api.logging.LogLevel
 import org.gradle.api.internal.component.SoftwareComponentInternal
 import org.gradle.api.publish.PublishingExtension
 import org.gradle.api.publish.internal.PublicationInternal
@@ -38,16 +49,20 @@ import org.gradle.api.publish.tasks.GenerateModuleMetadata
 import org.gradle.api.services.BuildService
 import org.gradle.api.services.BuildServiceParameters
 import org.gradle.internal.artifacts.repositories.AuthenticationSupportedInternal
+import org.gradle.authentication.http.BasicAuthentication
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
 import org.w3c.dom.Element
 
-// Stage A is local file publication only, not release approval or a sandbox for arbitrary
-// Gradle/init code. Keep the native component, artifacts and publisher actions unchanged.
+// Stage A stays local. Explicit remote mode requires the protected caller, finite selected
+// window and fresh writer-time admission. It is not a sandbox for arbitrary Gradle/init code.
 abstract class KiraPublicationByteState : BuildService<BuildServiceParameters.None> {
     @Volatile var restoredSeal: String? = null
     @Volatile var verifiedSeal: String? = null
     val guardedWriters = linkedSetOf<String>()
+    var remoteIndexes: Map<*, *>? = null
+    var remoteReadback: Map<*, *>? = null
+    var remoteWindow: Map<*, *>? = null
 }
 
 fun requireBytes(condition: Boolean, code: String, detail: String) {
@@ -190,13 +205,32 @@ if (byteMode == null) {
         requireBytes(allTasks.none { it is PublishToMavenRepository }, "MODE", "Native repository publication requires the explicit owned-file mode.")
     }
 } else {
-    requireBytes(byteMode in setOf("export", "promote"), "MODE", "Only export and promote owned-file modes exist.")
+    requireBytes(byteMode in setOf("export", "promote", "promote-remote"), "MODE", "Unknown byte mode.")
+    val remoteMode = byteMode == "promote-remote"
     requireBytes(gradle.gradleVersion == "9.6.1", "TOOLCHAIN", "The local byte binding requires Gradle9.6.1.")
     requireBytes(JavaVersion.current() == JavaVersion.VERSION_21, "TOOLCHAIN", "The local byte binding requires Java21.")
-    requireBytes(gradle.startParameter.isOffline, "OFFLINE", "Owned-file byte work requires offline mode; do not fetch missing prerequisites.")
+    requireBytes(gradle.startParameter.isOffline != remoteMode, "OFFLINE",
+        "Native remote upload requires online mode; owned-file export/promotion requires offline mode.")
     @Suppress("DEPRECATION")
     val configurationCacheRequested = gradle.startParameter.isConfigurationCacheRequested
     requireBytes(!configurationCacheRequested, "CACHE", "The invocation-local gate does not support configuration cache.")
+    if (remoteMode) {
+        requireBytes(System.getProperty("os.name") == "Mac OS X" && System.getProperty("os.arch") == "aarch64" &&
+            System.getenv("GITHUB_ACTIONS") == "true" && System.getenv("RUNNER_OS") == "macOS" && System.getenv("RUNNER_ARCH") == "ARM64",
+            "REMOTE_HOST", "Held remote byte work requires the actual hosted Darwin/ARM64 producer-compatible host.")
+        requireBytes(!gradle.startParameter.isRefreshDependencies && !gradle.startParameter.isContinueOnFailure && !gradle.startParameter.isBuildCacheEnabled &&
+            gradle.startParameter.logLevel !in setOf(LogLevel.DEBUG, LogLevel.INFO),
+            "REMOTE_FLAGS", "No dependency refresh, continue, build cache or verbose credential-bearing native transport logging.")
+        // Install before subproject evaluation, including configurations created later.
+        // This covers named project configurations, not settings/buildscript/detached resolution.
+        allprojects {
+            configurations.configureEach {
+                incoming.beforeResolve {
+                    throw GradleException("KIRA_PUBLICATION_BYTES_DEPENDENCIES: Product dependency resolution is forbidden during native promotion.")
+                }
+            }
+        }
+    }
 
     val ownedRoot = rootProject.projectDir.toPath().toRealPath()
     val byteRoot = ownedRoot.resolve("build/publication-bytes")
@@ -204,7 +238,21 @@ if (byteMode == null) {
     val incoming = byteRoot.resolve("input")
     val destination = byteRoot.resolve("owned-maven")
     val repositoryName = "engine6Owned"
+    // Keep the same native task identities in export/local/remote modes. Destination and
+    // credentials are a separately audited projection, NOT a weakening/rewrite of model.tsv.
+    val remoteDestination = URI("https://maven.pkg.github.com/kira-manga/kira-source-engine")
     val ownedRepositories = linkedMapOf<Project, MavenArtifactRepository>()
+    val nativeCredentials = linkedMapOf<Project, PasswordCredentials>()
+    val nativeAuthentication = linkedMapOf<Project, BasicAuthentication>()
+
+    fun remoteCredential(name: String, pattern: String): String {
+        val value = System.getenv(name)
+        requireBytes(value != null && value.matches(Regex(pattern)), "REMOTE_CUSTODY", "Explicit bounded remote custody is required.")
+        return requireNotNull(value)
+    }
+
+    val writeUsername = if (remoteMode) remoteCredential("KIRA_MAVEN_WRITE_USERNAME", "[A-Za-z0-9_-]{1,100}") else null
+    val writeToken = if (remoteMode) remoteCredential("KIRA_MAVEN_WRITE_TOKEN", "[A-Za-z0-9_.-]{1,1024}") else null
     val algorithms = linkedMapOf("md5" to "MD5", "sha1" to "SHA-1", "sha256" to "SHA-256", "sha512" to "SHA-512")
     val modules = listOf("source-contract", "source-engine", "source-testkit")
     val targets = linkedMapOf(
@@ -271,7 +319,18 @@ if (byteMode == null) {
             val publishing = project.extensions.getByType(PublishingExtension::class.java)
             ownedRepositories[project] = publishing.repositories.maven {
                 name = repositoryName
-                url = destination.toUri()
+                url = if (remoteMode) remoteDestination else destination.toUri()
+                if (remoteMode) {
+                    // Explicit values only. Do not use Gradle's repository-name credential discovery.
+                    credentials(PasswordCredentials::class.java, object : Action<PasswordCredentials> {
+                        override fun execute(value: PasswordCredentials) {
+                            value.username = writeUsername
+                            value.password = writeToken
+                            nativeCredentials[project] = value
+                        }
+                    })
+                    nativeAuthentication[project] = authentication.create("basic", BasicAuthentication::class.java)
+                }
             }
         }
     }
@@ -452,17 +511,26 @@ if (byteMode == null) {
             rootProject.subprojects.forEach { project ->
                 val configured = project.extensions.getByType(PublishingExtension::class.java).repositories.toList()
                 val repository = ownedRepositories.getValue(project)
-                requireBytes(configured.size == 1 && configured.single() === repository, "DESTINATION", "Only the fixed owned-file repository is permitted.")
+                requireBytes(configured.size == 1 && configured.single() === repository, "DESTINATION", "Only the mode's fixed repository is permitted.")
                 val uri = repository.url
-                requireBytes(repository.name == repositoryName && uri.scheme == "file" && uri.authority == null && uri.query == null &&
-                    uri.fragment == null && Path.of(uri).toAbsolutePath().normalize() == destination,
-                    "DESTINATION", "The native destination must be build/publication-bytes/owned-maven.")
-                // Reuse the separately reviewed Gradle9.6.1 presence query. The public getter
-                // creates empty credentials; never call it or inspect any credential values.
-                val noCredentials = runCatching {
-                    !(repository as AuthenticationSupportedInternal).configuredCredentials.isPresent
-                }.getOrDefault(false)
-                requireBytes(noCredentials && repository.authentication.isEmpty(), "DESTINATION", "Credentials/authentication are not permitted.")
+                requireBytes(repository.name == repositoryName, "DESTINATION", "Native repository identity changed.")
+                if (remoteMode) {
+                    val bound = nativeCredentials.getValue(project)
+                    val live = (repository as AuthenticationSupportedInternal).configuredCredentials.orNull
+                    requireBytes(uri == remoteDestination && !repository.isAllowInsecureProtocol && live === bound &&
+                        bound.username == writeUsername && bound.password == writeToken && repository.authentication.size == 1 &&
+                        repository.authentication.single() === nativeAuthentication.getValue(project),
+                        "DESTINATION", "Fixed native remote destination/authentication custody changed.")
+                } else {
+                    requireBytes(uri.scheme == "file" && uri.authority == null && uri.query == null &&
+                        uri.fragment == null && Path.of(uri).toAbsolutePath().normalize() == destination,
+                        "DESTINATION", "The native destination must be build/publication-bytes/owned-maven.")
+                    // Presence only: public getters create empty credentials. Local mode never reads values.
+                    val noCredentials = runCatching {
+                        !(repository as AuthenticationSupportedInternal).configuredCredentials.isPresent
+                    }.getOrDefault(false)
+                    requireBytes(noCredentials && repository.authentication.isEmpty(), "DESTINATION", "Credentials/authentication are not permitted.")
+                }
             }
             writers.forEach { writer ->
                 requireBytes(writer.repository === ownedRepositories.getValue(writer.project) &&
@@ -742,7 +810,7 @@ if (byteMode == null) {
         val initialProducers = producers(initialPayloads)
         val requiredExclusions = initialProducers.map { it.path }.toSet()
         val expectedSeal = rootProject.providers.gradleProperty("kiraPublicationSealSha256").orNull
-        requireBytes(if (byteMode == "promote") expectedSeal?.matches(Regex("[0-9a-f]{64}")) == true else expectedSeal == null,
+        requireBytes(if (byteMode != "export") expectedSeal?.matches(Regex("[0-9a-f]{64}")) == true else expectedSeal == null,
             "INPUT", "Promotion requires the independently retained SHA256 of seal.sha256; export must not accept a previous seal.")
 
         fun readBundle(): KiraBundle {
@@ -772,6 +840,205 @@ if (byteMode == null) {
             val status = task.state
             requireBytes(task in gradle.taskGraph.allTasks && task.enabled && status.executed && status.failure == null && !status.skipped,
                 "FRESH_CHECK", "The current invocation did not complete its required byte-path task: ${task.path}")
+        }
+
+        val recordPin = rootProject.providers.gradleProperty("kiraPublisherRecordSha256").orNull
+        requireBytes(if (remoteMode) recordPin?.matches(Regex("[0-9a-f]{64}")) == true else recordPin == null,
+            "REMOTE_RECORD", "Only held remote mode takes a private comparison-record SHA256.")
+
+        fun publicationIdentity(writer: PublishToMavenRepository): String = "${writer.project.path}:${writer.publication.name}"
+
+        fun readRemoteObservation(bundle: KiraBundle, active: PublishToMavenRepository?): Map<*, *> {
+            // Both the private tuple and actual hosted context are comparison inputs, NOT approval.
+            val contextKeys = listOf("GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_EVENT_NAME", "GITHUB_REF",
+                "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+            val context = contextKeys.associateWith { System.getenv(it).orEmpty() }
+            val run = context.getValue("GITHUB_RUN_ID")
+            requireBytes(run.matches(Regex("[1-9][0-9]{0,18}")) && context.getValue("GITHUB_RUN_ATTEMPT") == "1",
+                "REMOTE_RECORD", "An exact first publisher attempt is required.")
+            val temporary = Path.of(System.getenv("RUNNER_TEMP").orEmpty()).toAbsolutePath().normalize()
+            requireBytes(temporary.toRealPath() == temporary && !temporary.startsWith(ownedRoot),
+                "REMOTE_RECORD", "Publisher intake must remain outside the checkout.")
+            val privateRoot = temporary.resolve("kira-publisher-$run-1")
+            val owner = Files.getOwner(ownedRoot, NOFOLLOW_LINKS)
+            val directoryMode = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE)
+            val fileMode = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+            fun privatePath(path: Path, directory: Boolean) {
+                requireBytes(!Files.isSymbolicLink(path) && Files.getOwner(path, NOFOLLOW_LINKS) == owner &&
+                    Files.getPosixFilePermissions(path, NOFOLLOW_LINKS) == (if (directory) directoryMode else fileMode) &&
+                    (if (directory) Files.isDirectory(path, NOFOLLOW_LINKS) else Files.isRegularFile(path, NOFOLLOW_LINKS)),
+                    "REMOTE_RECORD", "Private publisher input ownership/type/mode refused.")
+            }
+            privatePath(privateRoot, true)
+            val recordPath = privateRoot.resolve("comparison.json")
+            val archive = privateRoot.resolve("kira-publication-bytes.tar")
+            fun recordBytes(): ByteArray {
+                privatePath(recordPath, false)
+                privatePath(archive, false)
+                requireBytes(Files.size(recordPath) <= 8L * 1024 * 1024 && Files.size(archive) <= 512L * 1024 * 1024,
+                    "REMOTE_RECORD", "Private input size refused.")
+                val bytes = Files.readAllBytes(recordPath)
+                requireBytes(sha256(bytes) == recordPin, "REMOTE_RECORD", "Private comparison bytes changed.")
+                return bytes
+            }
+            val record = jsonMap(JsonSlurper().parseText(String(recordBytes(), UTF_8)))
+            requireBytes(record.keys == setOf("selection", "preflight", "window"), "REMOTE_RECORD", "Unexpected comparison record fields.")
+            val readUsername = remoteCredential("KIRA_MAVEN_READ_USERNAME", "[A-Za-z0-9_-]{1,100}")
+            val readToken = remoteCredential("KIRA_MAVEN_READ_TOKEN", "[A-Za-z0-9_.-]{1,1024}")
+            val apiToken = remoteCredential("KIRA_PUBLICATION_API_READ_TOKEN", "[A-Za-z0-9_.-]{1,1024}")
+            requireBytes(readToken != writeToken && apiToken != writeToken, "REMOTE_CUSTODY", "Write custody must never enter a read helper.")
+            val guarded = writers.filter { it.path in state.get().guardedWriters }
+            // Only genuine task success enters this list. A failed original action cannot be skipped/retried.
+            if (active != null) guarded.forEach(::completed)
+            val prior = guarded.filter { writer ->
+                // The public TaskState getter, unlike its internal subtype, declares failure nullable.
+                val status = (writer as Task).state
+                status.executed && status.failure == null && !status.skipped
+            }
+            val completedIds = prior.map(::publicationIdentity).sorted()
+            val request = mapOf("phase" to if (active == null) "readback" else "writer", "root" to ownedRoot.toString(),
+                "archive" to archive.toString(), "record" to record, "context" to context,
+                "seal_sha256" to bundle.seal, "inventory_sha256" to sha256(incoming.resolve("inventory.tsv").toFile().readBytes()),
+                "completed" to completedIds, "active" to active?.let(::publicationIdentity), "indexes_before" to state.get().remoteIndexes,
+                "progress" to if (active == null) null else state.get().remoteReadback,
+                "window_progress" to state.get().remoteWindow,
+                "credentials" to mapOf("api_token" to apiToken, "username" to readUsername, "token" to readToken))
+            val input = JsonOutput.toJson(request).toByteArray(UTF_8)
+            requireBytes(input.size <= 8 * 1024 * 1024, "REMOTE_HELPER", "Boundary input exceeds its bound.")
+            val home = Files.createTempDirectory(privateRoot, "boundary-", PosixFilePermissions.asFileAttribute(directoryMode))
+            val expired = AtomicBoolean(false)
+            val timer = Executors.newSingleThreadScheduledExecutor { command ->
+                Thread(command, "kira-publication-boundary-deadline").apply { isDaemon = true }
+            }
+            var process: Process? = null
+            try {
+                // The sealed model does not enumerate release helpers. Authenticate all five
+                // imports against the selected producer commit before giving them read custody.
+                val sourceSha = jsonMap(jsonMap(record["selection"])["producer"])["source_sha"]
+                requireBytes(sourceSha is String && sourceSha.matches(Regex("[0-9a-f]{40}")),
+                    "REMOTE_HELPER", "Selected helper source identity refused.")
+                val helperNames = listOf("publisher_publication_intake.py", "remote_maven_readback.py",
+                    "publication_policy.py", "github_publication_receipts.py", "connected_publication_intake.py")
+                val helperPaths = helperNames.map { ".github/scripts/$it" }
+                val gitBuilder = ProcessBuilder(listOf("/usr/bin/git", "--no-optional-locks", "-C", ownedRoot.toString(),
+                    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "ls-tree", "-z", "--full-tree",
+                    sourceSha as String, "--") + helperPaths).redirectError(ProcessBuilder.Redirect.DISCARD)
+                gitBuilder.environment().clear()
+                gitBuilder.environment().putAll(mapOf("PATH" to "/usr/bin:/bin:/usr/sbin:/sbin", "HOME" to home.toString(),
+                    "TMPDIR" to home.toString(), "LANG" to "C", "LC_ALL" to "C", "GIT_CONFIG_NOSYSTEM" to "1",
+                    "GIT_CONFIG_GLOBAL" to "/dev/null", "GIT_TERMINAL_PROMPT" to "0", "GIT_NO_REPLACE_OBJECTS" to "1",
+                    "GIT_NO_LAZY_FETCH" to "1", "GIT_OPTIONAL_LOCKS" to "0", "GIT_ALLOW_PROTOCOL" to ""))
+                val gitChild = gitBuilder.start()
+                process = gitChild
+                val gitDeadline = timer.schedule({
+                    expired.set(true)
+                    gitChild.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+                    gitChild.destroyForcibly()
+                }, 60, TimeUnit.SECONDS)
+                gitChild.outputStream.close()
+                val treeBytes = gitChild.inputStream.use { it.readNBytes(4097) }
+                requireBytes(treeBytes.size <= 4096 && gitChild.waitFor(5, TimeUnit.SECONDS) && !expired.get() && gitChild.exitValue() == 0,
+                    "REMOTE_HELPER", "Bounded committed helper lookup refused.")
+                gitDeadline.cancel(false)
+                val tree = String(treeBytes, UTF_8)
+                requireBytes(tree.endsWith('\u0000'), "REMOTE_HELPER", "Committed helper entries refused.")
+                val entries = tree.dropLast(1).split('\u0000')
+                val blobs = entries.associate { entry ->
+                    val match = Regex("(100644|100755) blob ([0-9a-f]{40})\\t(\\.github/scripts/[A-Za-z0-9_]+\\.py)").matchEntire(entry)
+                    requireBytes(match != null, "REMOTE_HELPER", "Committed helper kind refused.")
+                    val groups = requireNotNull(match).groupValues
+                    groups[3] to groups[2]
+                }
+                requireBytes(entries.size == helperPaths.size && blobs.keys == helperPaths.toSet(),
+                    "REMOTE_HELPER", "Committed helper membership refused.")
+                val scripts = Files.createDirectory(home.resolve("scripts"), PosixFilePermissions.asFileAttribute(directoryMode))
+                helperPaths.forEach { path ->
+                    val source = owned(ownedRoot.resolve(path).toFile(), true)
+                    requireBytes(Files.size(source) <= 8L * 1024 * 1024, "REMOTE_HELPER", "Helper size refused.")
+                    val bytes = Files.newInputStream(source).use { it.readNBytes(8 * 1024 * 1024 + 1) }
+                    requireBytes(bytes.size <= 8 * 1024 * 1024, "REMOTE_HELPER", "Helper size changed.")
+                    val digest = MessageDigest.getInstance("SHA-1")
+                    digest.update("blob ${bytes.size}\u0000".toByteArray(UTF_8))
+                    requireBytes(HexFormat.of().formatHex(digest.digest(bytes)) == blobs.getValue(path),
+                        "REMOTE_HELPER", "Helper bytes differ from the selected producer commit.")
+                    val target = Files.createFile(scripts.resolve(Path.of(path).fileName), PosixFilePermissions.asFileAttribute(fileMode))
+                    Files.write(target, bytes)
+                }
+                val helper = scripts.resolve("publisher_publication_intake.py")
+                // Fixed system interpreter, no PATH fallback, shell, write credential, inherited
+                // token/config variables, argv secrets or persisted request/response bodies.
+                val builder = ProcessBuilder("/usr/bin/python3", "-B", "-E", "-s", helper.toString())
+                    .directory(ownedRoot.toFile()).redirectErrorStream(true)
+                builder.environment().clear()
+                builder.environment().putAll(mapOf("PATH" to "/usr/bin:/bin:/usr/sbin:/sbin", "HOME" to home.toString(),
+                    "TMPDIR" to home.toString(), "LANG" to "C", "LC_ALL" to "C"))
+                val child = builder.start()
+                process = child
+                timer.schedule({
+                    expired.set(true)
+                    child.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+                    child.destroyForcibly()
+                }, 900, TimeUnit.SECONDS)
+                child.outputStream.use { it.write(input) }
+                input.fill(0)
+                val output = ByteArrayOutputStream()
+                child.inputStream.use { stream ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = stream.read(buffer)
+                        if (count < 0) break
+                        requireBytes(output.size() + count <= 8 * 1024 * 1024, "REMOTE_HELPER", "Boundary output exceeds its bound.")
+                        output.write(buffer, 0, count)
+                    }
+                }
+                requireBytes(child.waitFor(5, TimeUnit.SECONDS) && !expired.get() && child.exitValue() == 0,
+                    "REMOTE_HELPER", "Read-only native boundary refused; child output is not exposed.")
+                val result = jsonMap(JsonSlurper().parseText(output.toString(UTF_8)))
+                requireBytes(result.keys == setOf("scope", "completed", "active", "seal_sha256", "inventory_sha256", "comparison_sha256", "indexes_before", "readback", "window", "expires_at", "producer", "publisher_run_id") &&
+                    result["scope"] == "native-release-boundary-admitted" && result["active"] == active?.let(::publicationIdentity) &&
+                    result["seal_sha256"] == bundle.seal && result["inventory_sha256"] == request["inventory_sha256"] &&
+                    jsonList(result["completed"]) == completedIds,
+                    "REMOTE_HELPER", "Native boundary response binding changed.")
+                val selection = jsonMap(record["selection"])
+                val producer = jsonMap(result["producer"])
+                val producerFields = setOf("run_id", "source_sha", "seal_sha256", "inventory_sha256")
+                requireBytes(producer.keys == producerFields && producerFields.all { producer[it] == jsonMap(selection["producer"])[it] } &&
+                    result["publisher_run_id"] == jsonMap(selection["publisher"])["run_id"] &&
+                    result["expires_at"] == jsonMap(selection["release_window"])["expires_at"],
+                    "REMOTE_HELPER", "Native producer, publisher or window binding changed.")
+                recordBytes() // Do not let remote observations conceal mutation of the selected comparison.
+                state.get().remoteIndexes = jsonMap(result["indexes_before"])
+                state.get().remoteReadback = result["readback"]?.let(::jsonMap)
+                state.get().remoteWindow = jsonMap(result["window"])
+                return result
+            } catch (_: Exception) {
+                throw GradleException("KIRA_PUBLICATION_BYTES_REMOTE_HELPER: Read-only boundary refused; no release authority.")
+            } finally {
+                input.fill(0)
+                timer.shutdownNow()
+                process?.let { child ->
+                    child.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+                    if (child.isAlive) child.destroyForcibly()
+                    requireBytes(child.waitFor(5, TimeUnit.SECONDS), "REMOTE_CLEANUP", "Boundary worker did not stop; private outputs retained.")
+                    runCatching { child.outputStream.close() }
+                    runCatching { child.inputStream.close() }
+                    runCatching { child.errorStream.close() }
+                }
+                Files.walk(home).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+            }
+        }
+
+        fun remoteObservation(bundle: KiraBundle, active: PublishToMavenRepository?): Map<*, *> = try {
+            readRemoteObservation(bundle, active)
+        } catch (_: Exception) {
+            throw GradleException("KIRA_PUBLICATION_BYTES_REMOTE_HELPER: Read-only boundary refused; no release authority.")
+        }
+
+        fun requireOpenWindow(observation: Map<*, *>) {
+            val expiry = observation["expires_at"]
+            requireBytes(expiry is Int || expiry is Long, "REMOTE_WINDOW", "Native window expiry is not an integer.")
+            requireBytes(System.currentTimeMillis() / 1000 < (expiry as Number).toLong(),
+                "REMOTE_WINDOW", "Native release window expired before the original action.")
         }
 
         // Assigned after all task providers exist; called at graph readiness and again at
@@ -859,6 +1126,29 @@ if (byteMode == null) {
                 val bundle = readBundle()
                 requireBytes(state.get().verifiedSeal == bundle.seal, "FRESH_CHECK", "No successful current-invocation verification.")
                 compareRestored(bundle)
+                if (remoteMode) {
+                    // A pre-action hold did not start a native write; do not fetch a fictitious cohort.
+                    requireBytes(state.get().guardedWriters.isNotEmpty(), "REMOTE_HELD", "No native remote action was admitted.")
+                    val observation = remoteObservation(bundle, null)
+                    auditPromotionGraph()
+                    compareRestored(readBundle())
+                    requireBytes(state.get().guardedWriters == selected.map { it.path }.toSet(), "READBACK", "Remote cohort has missing writer guards.")
+                    selected.forEach(::completed)
+                    val observed = jsonMap(observation["readback"])
+                    requireBytes(jsonList(observed["completed"]) == selected.map(::publicationIdentity).sorted() &&
+                        observed["inventory_sha256"] == observation["inventory_sha256"], "READBACK", "Incomplete actual remote readback.")
+                    requireOpenWindow(observation)
+                    val evidence = mapOf("scope" to "native-remote-maven-readback", "record_sha256" to recordPin,
+                        "producer" to observation["producer"], "publisher_run_id" to observation["publisher_run_id"],
+                        "publications" to selected.map(::publicationIdentity).sorted(), "readback" to observed,
+                        "window" to observation["window"])
+                    val data = JsonOutput.toJson(evidence).toByteArray(UTF_8)
+                    requireBytes(data.size <= 8 * 1024 * 1024, "READBACK", "Native readback evidence exceeds its bound.")
+                    val path = owned(byteRoot.resolve("remote-readback.json").toFile(), false)
+                    Files.write(path, data, CREATE_NEW, WRITE)
+                    logger.lifecycle("Actual native remote bytes matched all fifteen publications; consumer registry acceptance remains separate.")
+                    return@doLast
+                }
                 requireBytes(selected.isNotEmpty() && state.get().guardedWriters == selected.map { it.path }.toSet(), "READBACK", "Missing native writer guards.")
                 selected.forEach(::completed)
                 val selectedPublications = selected.map { it.publication }.toSet()
@@ -917,6 +1207,14 @@ if (byteMode == null) {
                 val guarded = state.get().guardedWriters
                 if (guarded.isEmpty()) emptyDestination()
                 else writers.filter { it.path in guarded }.forEach(::completed)
+                if (remoteMode) {
+                    val observation = remoteObservation(bundle, writer)
+                    // HTTP and Git were suspension/mutation windows. Re-audit the entire original
+                    // source/model/output/action boundary, not merely a cached before-network PASS.
+                    auditPromotionGraph()
+                    compareRestored(readBundle())
+                    requireOpenWindow(observation)
+                }
                 requireBytes(state.get().guardedWriters.add(writer.path), "FRESH_CHECK", "A native writer cannot be reused in this invocation.")
             }
             val recipe = writer.actions.toList()
@@ -927,7 +1225,7 @@ if (byteMode == null) {
 
         auditPromotionGraph = {
             auditActions()
-            requireBytes(byteMode == "promote" && gradle.startParameter.excludedTaskNames == requiredExclusions,
+            requireBytes(byteMode != "export" && gradle.startParameter.excludedTaskNames == requiredExclusions,
                 "EXCLUSIONS", "Use exactly the sealed model-derived fully qualified -x producer arguments.")
             requireBytes(producers(payloads()).map { it.path }.toSet() == requiredExclusions, "EXCLUSIONS", "Producer mapping changed after configuration.")
             val selectedTasks = gradle.taskGraph.allTasks
@@ -936,6 +1234,10 @@ if (byteMode == null) {
             requireBytes(selected.isNotEmpty() && selectedTasks.all { it in allowed } && restoreTask.get() in selectedTasks &&
                 verifyTask.get() in selectedTasks && readbackTask.get() in selectedTasks && selected.all { it in writers },
                 "GRAPH", "Promotion permits only restore, fresh verification, modeled native writers and readback; no producer/generator/check may run.")
+            requireBytes(!remoteMode || (selected.toSet() == writers.toSet() && !gradle.startParameter.isOffline &&
+                !gradle.startParameter.isRefreshDependencies && !gradle.startParameter.isContinueOnFailure &&
+                !gradle.startParameter.isBuildCacheEnabled && gradle.startParameter.logLevel !in setOf(LogLevel.DEBUG, LogLevel.INFO)),
+                "REMOTE_GRAPH", "Remote attachment requires all fifteen online native writers, no dependency refresh/resume/partial graph/cache or verbose transport logging.")
             selected
         }
 
