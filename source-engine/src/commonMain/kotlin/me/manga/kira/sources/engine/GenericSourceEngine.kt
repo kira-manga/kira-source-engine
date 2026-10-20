@@ -98,6 +98,8 @@ class GenericSourceEngine(
     }
 
     override suspend fun featured(page: Int): SourceEngineResult<List<SourceFeaturedItem>> = withFailureBoundary {
+        // Home-only declarations are valid; absence of the optional carousel is not a feed error.
+        if (config.endpoints["featured"] == null) return@withFailureBoundary SourceEngineResult.Success(emptyList())
         when (val result = fetchList("featured", page, query = "", map = ::featuredFrom)) {
             // Carousels may repeat their complete card set for seamless scrolling. Keep the first
             // occurrence in provider order, not a hard-coded number of slides.
@@ -143,7 +145,7 @@ class GenericSourceEngine(
         val pageHeaders = requestHeaders()
         // Reuse the already-read headers for the HTTP request too — pages() opens a chapter on the hot
         // path, and a second requestHeaders() would re-read persistent storage.
-        runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders, encryptedReader = true) { resp ->
+        val result = runRequest(endpoint, vars(itemUrl = manga.url, chapterUrl = chapter.url), precomputedHeaders = pageHeaders, encryptedReader = true) { resp ->
                 // Parse the (large) page body once and read both the page list and the response root off it.
                 val parsed = Extractor.parse(resp.body, effectiveBaseUrl, endpoint)
                 val scopes = parsed.listScopes()
@@ -165,6 +167,12 @@ class GenericSourceEngine(
                         SourcePage(url = destination.url, headers = headerPolicy.headersFor(destination, pageHeaders))
                     }
                 }
+        }
+        // A challenge/interstitial or a document with no usable images is not a readable chapter.
+        if (result is SourceEngineResult.Success && result.value.isEmpty()) {
+            SourceEngineResult.Failure(SourceEngineError.InvalidResponse)
+        } else {
+            result
         }
     }
 

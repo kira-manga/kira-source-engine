@@ -71,11 +71,14 @@ class GenericSourceEngineCredentialTest {
 
     @Test
     fun initial_foreign_details_and_pages_requests_withhold_every_source_header() = runTest {
-        val http = RecordingTransport { SourceResponse(200, """{"title":"Fixture","pages":[]}""") }
+        val http = RecordingTransport { SourceResponse(200, """{"title":"Fixture","pages":["https://foreign.test/page.webp"]}""") }
         var reads = 0
         val engine = GenericSourceEngine(config(), http, SourceHeaderProvider { reads++; captured })
         engine.details(manga("https://foreign.test/manga/1")).valueOrFail()
-        engine.pages(manga(), chapter("https://foreign.test/chapter/1")).valueOrFail()
+        assertEquals(
+            listOf(SourcePage("https://foreign.test/page.webp")),
+            engine.pages(manga(), chapter("https://foreign.test/chapter/1")).valueOrFail(),
+        )
         assertEquals(listOf("https://foreign.test/manga/1", "https://foreign.test/chapter/1"), http.requests.map { it.url })
         assertTrue(http.requests.all { it.headers.isEmpty() })
         assertEquals(2, reads)
