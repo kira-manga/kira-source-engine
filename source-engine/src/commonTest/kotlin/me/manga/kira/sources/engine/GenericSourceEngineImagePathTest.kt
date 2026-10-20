@@ -120,8 +120,10 @@ class GenericSourceEngineImagePathTest {
             val body = if (hasPrimary) """<img class="page" src="https://foreign.test/Series Name/primary.jpg">"""
                 else """<img class="page">"""
             val http = RecordingTransport { SourceResponse(200, body) }
-            val pages = GenericSourceEngine(source, http, FakeHeaderStore(captured)).pages(manga, chapter).valueOrFail()
-            assertTrue(pages.isEmpty())
+            assertEquals(
+                SourceEngineResult.Failure(SourceEngineError.InvalidResponse),
+                GenericSourceEngine(source, http, FakeHeaderStore(captured)).pages(manga, chapter),
+            )
         }
     }
 
