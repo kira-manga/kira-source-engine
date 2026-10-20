@@ -111,7 +111,8 @@ class DeclarationCapabilitiesTest {
         engine.featured(2).valueOrFail()
         engine.search("x \"y\"", 4).valueOrFail()
         engine.details(manga).valueOrFail() // Includes one separate chapters request.
-        engine.pages(manga, chapter).valueOrFail()
+        // The request still executes; its empty synthetic reader response is rejected afterwards.
+        assertEquals(SourceEngineResult.Failure(SourceEngineError.InvalidResponse), engine.pages(manga, chapter))
         assertEquals(6, transport.requests.size)
         val expectedPages = listOf("3", "2", "4", "7", "7", "7")
         transport.requests.forEachIndexed { index, request ->
