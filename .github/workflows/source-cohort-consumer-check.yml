@@ -24,10 +24,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Genuine completed 0.2.1 promotion39154908687, selected only after successful readback.
-  # Producer671 tests plus5Darwin IPC cases are not replayed; no packages token is needed.
+  # Genuine completed 0.2.7 promotion39370741913, selected only after successful readback.
+  # Producer677 tests plus5Darwin IPC cases are not replayed; no packages token is needed.
   SELECTED_PROMOTION: >-
-    {"artifact_id":12146842083,"artifact_name":"kira-owned-file-promotion-39154908687-1","artifact_sha256":"c3e04f86d223badee9a676f610b52926f4c03979aea05d93a2ae7186260390c0","artifact_size":2126132,"job_id":117756015239,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"07a53495f6cfdc16e83f64de8a3b46c9f30aba9e3b24677416df7898e5b27a17","size":2600960},"producer":{"archive_sha256":"e8794aec2c9da40a0727f8797b620b49ad679d305f478dae280e7bdb2f67e516","artifact_id":12146671121,"attestation_job_id":117754327370,"inventory_sha256":"9aa7dca5a2ce63046dfb40303daa3fa735144dbcf38b6c180decf6aa5c69367d","producer_job_id":117750324786,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39153004453,"seal_sha256":"f61bd5549dca64ad6bc6703bf306003b0285e42741600a71fc095fbcf9989b37","source_sha":"f8742812be012488500baeecd92600c6f4133b5d","source_tree":"7f369357c422315ab65c79a6e4ee1dedc0f2a683","transport_sha256":"cfa2f39cc67acee08af45241f777b31ebbb17d63412b37b4fdc9bc4be174e776","version":"0.2.1","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"f8742812be012488500baeecd92600c6f4133b5d","workflow_sha256":"7699cac241a32cc5d8456f9c02019c793dedd233ac9b30a9c55d5421695f33b1"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39154908687,"source_sha":"94cf2b55c4b453818b25c2ceddf0a33e41e13f1e","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
+    {"artifact_id":12241715531,"artifact_name":"kira-owned-file-promotion-39370741913-1","artifact_sha256":"8502546fae732d62c18f78e1a3f69731120f939d8d84990634d05ee23a7d1719","artifact_size":2127710,"job_id":118457824862,"owned_maven":{"file":"owned-maven.tar","files":420,"sha256":"dfe1732c037441dcd55ee8a70374bb6fb7d1f0ec99b5ed9e546735efcd631ec0","size":2600960},"producer":{"archive_sha256":"cb5cc6d6ee772bbea280a80eb31c51f22103fa1cc7317d705a8026a706691255","artifact_id":12240952607,"attestation_job_id":118455831362,"inventory_sha256":"5d248ed6f91ec453abf76ec4ed58db33cb5ce5f55c59f0eee4562cb825074f66","producer_job_id":118450690110,"ref":"refs/heads/remediation/production-readiness-2026-09-04","repository":"kira-manga/kira-source-engine","run_attempt":1,"run_id":39368491643,"seal_sha256":"e5fb342a571c4901184d27c69f6b5e045e7e7b4591d0d55c5b00b62d1dcf190f","source_sha":"871e28c1898c90d749d4dae3b26637bd13fe1741","source_tree":"34b23ed815cae121321021f6a91904c36578881d","transport_sha256":"57b4193bc0592cfd309bc8c7b9ce79469fd38d14dae73cedddcdedcadd63aba8","version":"0.2.7","workflow_id":319431577,"workflow_ref":"kira-manga/kira-source-engine/.github/workflows/ci.yml@refs/heads/remediation/production-readiness-2026-09-04","workflow_sha":"871e28c1898c90d749d4dae3b26637bd13fe1741","workflow_sha256":"d048e77145b7b3c29343462eeea46d4649750f718b53195f9845e22bb9c4b579"},"ref":"refs/heads/remediation/priority-sources-20261017","repository":"kira-manga/kira-source-engine","repository_id":1310736214,"run_attempt":1,"run_id":39370741913,"source_sha":"4c1007bf7c6fb683b2b73b159980e4389e5e9e63","workflow_id":387605345,"workflow_path":".github/workflows/owned-file-promotion-check.yml"}
 
 # Check-only followups may select one affected platform via the pushed commit message.
 # [consumer apple] / [consumer linux] / [consumer backend]; absent or ambiguous tags run both platforms.
@@ -65,14 +65,14 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: 88ec235bcc2530fe458a25221dcf16eee1e4535d
+          ref: 6c7ba65f10f9d21e705b988596ce31ca3f896e81
           path: app
           persist-credentials: false
       - name: Exact public Backend source candidate
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/Kira-backend
-          ref: d1e69bee705265a9f08b38a0c221510159f8a4f9
+          ref: 9ead6a5eb6de1ac4608dd83001540b6d5b787151
           path: backend
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
@@ -154,7 +154,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: 88ec235bcc2530fe458a25221dcf16eee1e4535d
+          ref: 6c7ba65f10f9d21e705b988596ce31ca3f896e81
           path: app
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact

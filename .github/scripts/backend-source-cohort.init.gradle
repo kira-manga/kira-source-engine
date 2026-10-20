@@ -9,7 +9,7 @@ import org.gradle.api.tasks.testing.Test
 // Check-only JVM consumer. The Engine orchestrator admits the original inventory
 // and actual owned-Maven bytes. Never substitute versions, dependencies or locks.
 def group = 'me.manga.kira.source'
-def version = '0.2.1'
+def version = '0.2.7'
 def require = { condition, message ->
     if (!condition) throw new GradleException('Source cohort refused: ' + message)
 }
@@ -59,10 +59,16 @@ def rows = lines.collect { line ->
     [project: cells[0], publication: cells[1], module: cells[3], kind: cells[5], path: cells[6], size: size, sha256: cells[8]]
 }
 require(rows.collect { it.path }.toSet().size() == rows.size(), 'Duplicate inventory entry')
-def wanted = rows.findAll {
+def mainBinaries = rows.findAll {
     it.project in [':source-contract', ':source-engine'] && it.publication == 'jvm' && it.kind == 'artifact'
 }
-require(wanted.size() == 2 && wanted.collect { it.project }.toSet().size() == 2, 'Two selected JVM binaries required')
+def testBinaries = rows.findAll {
+    it.project in [':source-contract', ':source-engine', ':source-testkit'] && it.publication == 'jvm' && it.kind == 'artifact'
+}
+require(mainBinaries.size() == 2 && mainBinaries.collect { it.project }.toSet().size() == 2,
+    'Exactly contract and engine JVM binaries required for main compilation')
+require(testBinaries.size() == 3 && testBinaries.collect { it.project }.toSet().size() == 3,
+    'Exactly contract, engine and testkit JVM binaries required for tests')
 def prefix = 'me.manga.kira.backend.sourceconfig.'
 def originalSelectors = [
     'parsing.ManhwatopPublishedEngineTest', 'parsing.AuthoredSourceConfigTest', 'parsing.SourceConfigParserTest',
@@ -114,13 +120,13 @@ def attrs = { attributes -> attributes.keySet().sort { it.name }.collectEntries 
     [(it.name): attributes.getAttribute(it).toString()]
 } }
 def observed = new LinkedHashSet()
-def witness = { task, configuration, inputFiles ->
+def witness = { task, configuration, inputFiles, wanted ->
     require(sha(inventory) == inventorySha && configuration.canBeResolved, 'Changed inventory/unresolvable actual configuration')
     def artifacts = configuration.incoming.artifactView {
         componentFilter { id -> id instanceof ModuleComponentIdentifier && id.group == group }
         lenient = false
     }.artifacts.artifacts
-    require(artifacts.size() == 2, 'Missing/extra actual source binaries')
+    require(artifacts.size() == wanted.size(), 'Missing/extra actual source binaries')
     def inputs = inputFiles.collect { it.canonicalFile }.toSet()
     def selected = wanted.collect { row ->
         def matches = artifacts.findAll { artifact ->
@@ -148,15 +154,18 @@ gradle.projectsEvaluated {
     def project = gradle.rootProject
     def declared = project.configurations.getByName('implementation').dependencies.findAll { it.group == group }
     require(declared.size() == 1 && declared[0].name == 'source-engine' && declared[0].version == version,
-        'Actual Backend must declare source-engine:0.2.1 without testkit')
+        'Actual Backend must declare source-engine:0.2.7 in implementation')
+    def testDeclared = project.configurations.getByName('testImplementation').dependencies.findAll { it.group == group }
+    require(testDeclared.size() == 1 && testDeclared[0].name == 'source-testkit' && testDeclared[0].version == version,
+        'Actual Backend must declare source-testkit:0.2.7 only in testImplementation')
     def compile = project.tasks.getByName('compileKotlin')
-    compile.doFirst { witness(compile, project.configurations.getByName('compileClasspath'), compile.libraries.files) }
+    compile.doFirst { witness(compile, project.configurations.getByName('compileClasspath'), compile.libraries.files, mainBinaries) }
     def test = project.tasks.getByName('test')
     require(test instanceof Test && test.maxParallelForks == 1, 'One actual JVM Test worker required')
     def temporary = System.getenv('TMPDIR')
     require(temporary && new File(temporary).isAbsolute() && new File(temporary).isDirectory(), 'Owned test temporary directory required')
     test.systemProperty('java.io.tmpdir', temporary)
-    test.doFirst { witness(test, project.configurations.getByName('testRuntimeClasspath'), test.classpath.files) }
+    test.doFirst { witness(test, project.configurations.getByName('testRuntimeClasspath'), test.classpath.files, testBinaries) }
     emit('INPUT', [version: version, inventorySha256: inventorySha, selectors: selectors.toList().sort()])
 }
 gradle.taskGraph.whenReady { graph ->

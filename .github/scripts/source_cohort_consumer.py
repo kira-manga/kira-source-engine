@@ -23,10 +23,10 @@ import publisher_workflow as common
 
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
-SELECTION_SHA256 = "da4ccce8447b4d067ecdd45a6b73992e4e685f9fe87d7fcca95b308797db4c05"
-APP_SHA = "88ec235bcc2530fe458a25221dcf16eee1e4535d"
-BACKEND_SHA = "d1e69bee705265a9f08b38a0c221510159f8a4f9"
-APP_INIT_SHA = "f7be0ba204524396bfd962d1a099157b7e14e5bc63a9f031a17896c922796b3c"
+SELECTION_SHA256 = "0ce1b7c2e6c2f9e7b0c94d10c82e0deca53cb12bd3bc4fd749009f7d0932005d"
+APP_SHA = "6c7ba65f10f9d21e705b988596ce31ca3f896e81"
+BACKEND_SHA = "9ead6a5eb6de1ac4608dd83001540b6d5b787151"
+APP_INIT_SHA = "dfd9413dc32b79b01e4d8786b64969152f8255ebef0ce276b458afd0d10c9743"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
 RUNTIME_PREFIX = "me.manga.kira.sources.runtime."
@@ -170,7 +170,7 @@ def intake(job, selected, token):
     actual = owned_tar(folder / "owned-maven.tar", manifest, selected["owned_maven"])
     payloads = {row[6]: actual[row[6]] for line in policy.text_lines(metadata["inventory.tsv"])
                 if not (row := line.split("\t"))[5].startswith("checksum:")}
-    checked = policy.check_bundle(metadata, payloads, "0.2.1", before["files"])
+    checked = policy.check_bundle(metadata, payloads, "0.2.7", before["files"])
     policy.require(all(checked[k] == selected["producer"][k] for k in ("inventory_sha256", "seal_sha256")), "Original sealed metadata changed")
     for line in policy.text_lines(metadata["inventory.tsv"]):
         row = line.split("\t")
