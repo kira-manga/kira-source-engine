@@ -24,9 +24,9 @@ import publisher_workflow as common
 
 WORKFLOW = ".github/workflows/source-cohort-consumer-check.yml"
 SELECTION_SHA256 = "0ce1b7c2e6c2f9e7b0c94d10c82e0deca53cb12bd3bc4fd749009f7d0932005d"
-APP_SHA = "af4d5841d279e3e7e642474da28a7737e88cb0ec"
+APP_SHA = "84881a3b3f24d62f1671cb29c04d79cf9598a484"
 BACKEND_SHA = "9ead6a5eb6de1ac4608dd83001540b6d5b787151"
-APP_INIT_SHA = "dfd9413dc32b79b01e4d8786b64969152f8255ebef0ce276b458afd0d10c9743"
+APP_INIT_SHA = "77bae505f89ee8b032275898424434e6f0800725113cefe12e6bde7a375ebd74"
 FINITE_FEEDS = "finite feeds survive canonical authoring and reject unsupported verbs"
 ENGINE_PREFIX = "me.manga.kira.sources.engine."
 RUNTIME_PREFIX = "me.manga.kira.sources.runtime."

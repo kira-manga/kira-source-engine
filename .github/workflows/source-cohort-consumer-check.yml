@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: af4d5841d279e3e7e642474da28a7737e88cb0ec
+          ref: 84881a3b3f24d62f1671cb29c04d79cf9598a484
           path: app
           persist-credentials: false
       - name: Exact public Backend source candidate
@@ -154,7 +154,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: kira-manga/kira-app
-          ref: af4d5841d279e3e7e642474da28a7737e88cb0ec
+          ref: 84881a3b3f24d62f1671cb29c04d79cf9598a484
           path: app
           persist-credentials: false
       - name: Download Engine's own immutable selected promotion artifact
